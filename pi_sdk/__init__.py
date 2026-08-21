@@ -12,8 +12,9 @@ from pi_sdk.config import AgentOptions, Config, BUILTIN_PROVIDERS
 from pi_sdk.events import AgentEvent, EventType
 from pi_sdk.models import Message, Role, Session
 from pi_sdk.permissions import PermissionDecision
+from pi_sdk.storage import SessionStore, create_store, DiskSessionStore
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
@@ -23,6 +24,7 @@ __all__ = [
     "AuthenticationError",
     "BUILTIN_PROVIDERS",
     "Config",
+    "DiskSessionStore",
     "EventType",
     "Message",
     "PermissionDecision",
@@ -30,6 +32,8 @@ __all__ = [
     "Role",
     "RunResult",
     "Session",
+    "SessionStore",
     "UsageSummary",
+    "create_store",
     "__version__",
 ]

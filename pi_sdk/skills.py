@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pi_sdk.memory import get_data_root, get_workspace
+from pi_sdk.paths import get_data_root, get_workspace
 
 
 class Skills:

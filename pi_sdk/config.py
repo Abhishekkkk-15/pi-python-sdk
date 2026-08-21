@@ -127,6 +127,12 @@ class AgentOptions:
     max_history_messages: int = DEFAULT_MAX_HISTORY_MESSAGES
     skill_names: Optional[list[str]] = None
     system_prompt_extra: Optional[str] = None
+    storage: str = "disk"
+    mongodb_uri: Optional[str] = None
+    mongodb_db: str = "pi_sdk"
+    user_id: Optional[str] = None
+    # Injected SessionStore instance (not serialized); set via Agent.create(store=...)
+    store: Any = None
 
 
 @dataclass
@@ -152,6 +158,11 @@ class Config:
     data_dir: Optional[str] = None
     skill_names: Optional[list[str]] = None
     system_prompt_extra: Optional[str] = None
+    storage: str = "disk"
+    mongodb_uri: Optional[str] = None
+    mongodb_db: str = "pi_sdk"
+    user_id: Optional[str] = None
+    store: Any = None
 
     @classmethod
     def from_options(cls, options: AgentOptions | None = None, **kwargs: Any) -> "Config":
@@ -212,6 +223,11 @@ class Config:
             data_dir=opts.data_dir,
             skill_names=opts.skill_names,
             system_prompt_extra=opts.system_prompt_extra,
+            storage=str(getattr(opts, "storage", None) or "disk"),
+            mongodb_uri=getattr(opts, "mongodb_uri", None),
+            mongodb_db=str(getattr(opts, "mongodb_db", None) or "pi_sdk"),
+            user_id=getattr(opts, "user_id", None),
+            store=getattr(opts, "store", None),
         )
 
     def rotate_api_key(self) -> bool:

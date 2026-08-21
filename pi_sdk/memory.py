@@ -1,78 +1,37 @@
-"""Session persistence and data-root helpers for the PI SDK."""
+"""In-memory conversation state backed by a SessionStore."""
 
 from __future__ import annotations
 
-import json
-import os
-import uuid
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
 
 from pi_sdk.models import Message, Role, Session
+from pi_sdk.paths import get_data_root, get_workspace, set_data_root, set_workspace
+from pi_sdk.storage.base import SessionStore
+from pi_sdk.storage.disk import DiskSessionStore, read_json, write_json
 
-# Process-wide defaults (overridden by Agent.create)
-_DATA_ROOT: Optional[Path] = None
-_WORKSPACE: Optional[Path] = None
-
-
-def set_data_root(path: str | Path | None) -> Path:
-    global _DATA_ROOT
-    if path is None:
-        _DATA_ROOT = None
-        return get_data_root()
-    _DATA_ROOT = Path(path).expanduser().resolve()
-    _DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    return _DATA_ROOT
-
-
-def set_workspace(path: str | Path | None) -> Path:
-    global _WORKSPACE
-    if path is None:
-        _WORKSPACE = None
-        return get_workspace()
-    _WORKSPACE = Path(path).expanduser().resolve()
-    return _WORKSPACE
-
-
-def get_workspace() -> Path:
-    if _WORKSPACE is not None:
-        return _WORKSPACE
-    return Path.cwd()
-
-
-def get_data_root() -> Path:
-    """
-    Directory for auth/sessions.
-
-    Priority:
-    1. set_data_root(...) / Agent.create(data_dir=...)
-    2. PI_SDK_DATA_DIR env
-    3. ~/.pi-sdk
-    """
-    if _DATA_ROOT is not None:
-        return _DATA_ROOT
-    env = (os.getenv("PI_SDK_DATA_DIR") or "").strip()
-    if env:
-        root = Path(env).expanduser().resolve()
-    else:
-        root = Path.home() / ".pi-sdk"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def generate_chat_id() -> str:
-    return uuid.uuid4().hex
+__all__ = [
+    "Memory",
+    "get_data_root",
+    "get_workspace",
+    "set_data_root",
+    "set_workspace",
+]
 
 
 class Memory:
-    messages: list[Message]
-    session: Union[Session, None]
+    """Façade: in-RAM messages + durable SessionStore."""
 
-    def __init__(self) -> None:
-        self.messages = []
-        self.session = None
+    def __init__(
+        self,
+        store: SessionStore | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        self.store: SessionStore = store or DiskSessionStore()
+        self.user_id = user_id
+        self.messages: list[Message] = []
+        self.session: Session | None = None
 
     @property
     def root(self) -> Path:
@@ -85,153 +44,92 @@ class Memory:
         *,
         workspace: Path | None = None,
     ) -> Session:
-        sid = generate_chat_id()
         ws = Path(workspace) if workspace is not None else get_workspace()
-        data_root = get_data_root()
-        history_dir = data_root / sid
-        history_dir.mkdir(parents=True, exist_ok=True)
-        conversation_jsonl = history_dir / "conversation_history.jsonl"
-        conversation_jsonl.touch()
-        session = Session(
-            id=sid,
+        session = self.store.create_session(
             title=title,
             workspace=ws,
-            history_path=conversation_jsonl,
+            user_id=self.user_id,
         )
         self.session = session
-        self.write_to_json(history_dir / "metadata.json", session)
         if initial_messages:
-            self.write_to_jsonl(conversation_jsonl, initial_messages, mode="a")
+            self.store.replace_messages(session.id, initial_messages)
         return session
 
     def load_old_sessions(self) -> list[Session]:
-        memory_path = get_data_root()
-        if not memory_path.exists():
-            return []
-
-        sessions: list[Session] = []
-        for folder in memory_path.iterdir():
-            if not folder.is_dir():
-                continue
-            metadata_file = folder / "metadata.json"
-            if not metadata_file.exists():
-                continue
-            try:
-                with open(metadata_file, "r", encoding="utf-8") as file:
-                    data = json.load(file)
-                sessions.append(
-                    Session(
-                        id=data.get("id", folder.name),
-                        title=data.get("title", folder.name),
-                        workspace=Path(data["workspace"])
-                        if "workspace" in data
-                        else get_workspace(),
-                        history_path=Path(data["history_path"])
-                        if "history_path" in data
-                        else folder / "conversation_history.jsonl",
-                        permissions=data.get(
-                            "permissions",
-                            {
-                                "allow_all": False,
-                                "allowed_tools": [],
-                                "allowed_targets": {},
-                            },
-                        ),
-                        prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
-                        completion_tokens=int(data.get("completion_tokens", 0) or 0),
-                        total_tokens=int(data.get("total_tokens", 0) or 0),
-                        cached_tokens=int(data.get("cached_tokens", 0) or 0),
-                        estimated_cost_usd=float(
-                            data.get("estimated_cost_usd", 0.0) or 0.0
-                        ),
-                        compaction_summary=str(
-                            data.get("compaction_summary", "") or ""
-                        ),
-                        compacted_until=int(data.get("compacted_until", 0) or 0),
-                    )
-                )
-            except (json.JSONDecodeError, KeyError, OSError):
-                continue
-        return sessions
+        return self.store.list_sessions(user_id=self.user_id)
 
     def get_session_by_id(self, session_id: str) -> Optional[Session]:
-        for session in self.load_old_sessions():
-            if session.id == session_id:
-                return session
-        return None
+        return self.store.get_session(session_id, user_id=self.user_id)
 
-    def load_session_chat(self, path: Path, system_prompt: str = "") -> list[Message]:
-        if not path or not path.exists():
+    def load_session_chat(
+        self,
+        session_or_path: Session | Path | str | None = None,
+        system_prompt: str = "",
+        *,
+        session_id: str | None = None,
+    ) -> list[Message]:
+        """Load messages into self.messages from store (or legacy disk path)."""
+        sid = session_id
+        if isinstance(session_or_path, Session):
+            sid = session_or_path.id
+        elif sid is None and session_or_path is not None:
+            from pi_sdk.storage.disk import read_jsonl
+
+            path = Path(session_or_path)
+            old_chat = read_jsonl(path) if path.exists() else []
+            if not old_chat or old_chat[0].role != Role.SYSTEM:
+                if system_prompt:
+                    old_chat.insert(
+                        0, Message(role=Role.SYSTEM, content=system_prompt)
+                    )
+            self.messages = old_chat
+            return old_chat
+
+        if not sid and self.session:
+            sid = self.session.id
+        if not sid:
+            self.messages = []
             return []
-        old_chat = self.read_from_jsonl(path=path)
+
+        old_chat = self.store.load_messages(sid)
         if not old_chat or old_chat[0].role != Role.SYSTEM:
             if system_prompt:
                 old_chat.insert(0, Message(role=Role.SYSTEM, content=system_prompt))
         self.messages = old_chat
         return old_chat
 
+    def append_message(self, msg: Message) -> None:
+        self.messages.append(msg)
+        if self.session:
+            self.store.append_messages(self.session.id, [msg])
+
+    def replace_messages(self, messages: list[Message] | None = None) -> None:
+        if messages is not None:
+            self.messages = list(messages)
+        if self.session:
+            self.store.replace_messages(self.session.id, self.messages)
+
+    def save_session(self) -> None:
+        if self.session:
+            self.store.save_session(self.session)
+
     @staticmethod
     def write_to_json(path: Union[str, Path], data: Any) -> None:
-        file_path = Path(path)
-        payload = asdict(data) if is_dataclass(data) else data  # type: ignore
-        try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as file:
-                json.dump(payload, file, indent=4, default=str)
-        except TypeError as e:
-            raise TypeError(
-                f"Failed to serialize data for {file_path.name}: {e}"
-            ) from e
-        except OSError as e:
-            raise RuntimeError(f"Could not write to {file_path}: {e}") from e
+        write_json(path, data)
 
     @staticmethod
     def read_from_json(path: Union[str, Path]) -> Any:
-        file_path = Path(path)
-        try:
-            with open(file_path, "r", encoding="utf-8") as file:
-                return json.load(file)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
+        return read_json(path)
 
     def write_to_jsonl(
         self, path: Union[str, Path], data_list: list[Any], mode: str = "w"
     ) -> None:
-        def default_serializer(obj: Any) -> Any:
-            if isinstance(obj, Role):
-                return obj.value
-            if isinstance(obj, Enum):
-                return obj.value
-            if isinstance(obj, Path):
-                return str(obj)
-            return str(obj)
+        """Legacy path-based API; prefer append_message / replace_messages."""
+        from pi_sdk.storage.disk import write_jsonl
 
-        with open(path, mode, encoding="utf-8") as file:
-            for item in data_list:
-                if hasattr(item, "to_dict"):
-                    payload = item.to_dict()
-                elif is_dataclass(item):
-                    payload = asdict(item)
-                else:
-                    payload = item
-                file.write(json.dumps(payload, default=default_serializer) + "\n")
+        write_jsonl(path, data_list, mode=mode)
 
     def read_from_jsonl(self, path: Union[str, Path]) -> list[Message]:
-        messages: list[Message] = []
-        with open(path, "r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                messages.append(
-                    Message(
-                        role=Role.from_val(data.get("role", "system")),
-                        content=data.get("content", ""),
-                        name=data.get("name", None),
-                        tool_calls=data.get("tool_calls", None),
-                        tool_call_id=data.get("tool_call_id", None),
-                        reasoning_content=data.get("reasoning_content", None),
-                    )
-                )
-        return messages
+        from pi_sdk.storage.disk import read_jsonl
+
+        return read_jsonl(path)

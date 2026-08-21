@@ -127,10 +127,12 @@ class PermissionManager:
             if target_key not in perms["allowed_targets"][tool_name]:
                 perms["allowed_targets"][tool_name].append(target_key)
 
-        # Persist updated session metadata to metadata.json on disk
+        # Persist updated session metadata via Memory façade / SessionStore
         try:
-            if memory and hasattr(session, "history_path") and session.history_path:
-                metadata_file = session.history_path.parent / "metadata.json"
-                memory.write_to_json(metadata_file, session)
+            if memory and hasattr(memory, "save_session"):
+                memory.session = session
+                memory.save_session()
+            elif memory and hasattr(memory, "store") and hasattr(memory.store, "save_session"):
+                memory.store.save_session(session)
         except Exception:
             pass

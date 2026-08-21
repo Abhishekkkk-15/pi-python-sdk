@@ -86,7 +86,7 @@ class Session:
     id: str
     title: str
     workspace: Path
-    history_path: Path
+    history_path: Path | None = None  # disk-only; None for Mongo/other stores
     permissions: dict = field(default_factory=lambda: {
         "allow_all": False,
         "allowed_tools": [],
@@ -100,6 +100,9 @@ class Session:
     # Compaction: summary of messages[1:compacted_until]; recent tail stays raw
     compaction_summary: str = ""
     compacted_until: int = 0
+    user_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 class Models(Enum):
     EMBEED = "mistral-embed"

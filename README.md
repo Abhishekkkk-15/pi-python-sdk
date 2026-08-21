@@ -94,20 +94,43 @@ agent.reset_conversation()            # clear in-memory history
 
 ### Where sessions are stored
 
+**Disk (default)** — under `~/.pi-sdk/` (or `data_dir` / `PI_SDK_DATA_DIR`):
+
 ```
-~/.pi-sdk/                            # default data root
+~/.pi-sdk/
 ├── <session-id>/
-│   ├── metadata.json                 # title, workspace, usage, permissions
-│   └── conversation_history.jsonl    # full message log
-└── skills/                           # optional global skills
+│   ├── metadata.json
+│   └── conversation_history.jsonl
+└── skills/
 ```
 
-Override with:
+**MongoDB (opt-in)** — session metadata + chat messages only (not workspace files):
 
-- `Agent.create(data_dir="/var/pi-sessions")`
-- env `PI_SDK_DATA_DIR`
+```bash
+pip install "pi-sdk[mongodb]"
+```
 
-The **workspace** (`cwd`) is the project the tools edit — independent of `data_dir`.
+```python
+agent = Agent.create(
+    api_key="...",
+    storage="mongodb",
+    mongodb_uri="mongodb://localhost:27017",  # or PI_SDK_MONGODB_URI / MONGODB_URI
+    mongodb_db="pi_sdk",
+    user_id="user_42",   # optional tenant scope for list/resume
+    cwd="/workspace/proj",
+)
+result = agent.run("...")
+# later:
+agent2 = Agent.create(..., storage="mongodb", mongodb_uri="...", user_id="user_42")
+agent2.resume(result.session_id)
+```
+
+Collections: `sessions` (`_id` = session id) and `messages` (`session_id` + `seq`).  
+Workspace **files** stay on the filesystem (`cwd`); Mongo only holds conversation state.
+
+You can also inject a custom store: `Agent.create(store=my_store, ...)`.
+
+The **workspace** (`cwd`) is the project the tools edit — independent of session storage.
 
 ---
 
@@ -121,7 +144,12 @@ The **workspace** (`cwd`) is the project the tools edit — independent of `data
 | `model` | `str` | provider default | Model id |
 | `base_url` | `str` | builtin | OpenAI-compatible endpoint (or Vertex location) |
 | `cwd` | `str`/`Path` | process cwd | Workspace for tools / skills |
-| `data_dir` | `str`/`Path` | `~/.pi-sdk` | Session + auth storage |
+| `data_dir` | `str`/`Path` | `~/.pi-sdk` | Disk session root (when `storage="disk"`) |
+| `storage` | `str` | `"disk"` | `"disk"` or `"mongodb"` |
+| `mongodb_uri` | `str` | `PI_SDK_MONGODB_URI` / `MONGODB_URI` | Mongo connection string |
+| `mongodb_db` | `str` | `"pi_sdk"` | Mongo database name |
+| `user_id` | `str` | `None` | Tenant scope for create/list/resume |
+| `store` | `SessionStore` | `None` | Inject custom store (wins over `storage`) |
 | `tavily_api_key` | `str` | `TAVILY_API_KEY` | Enables `web_search` |
 | `autonomous` | `bool` | `True` | Skip permission checks |
 | `permission_callback` | `callable` | `None` | `(tool, target, details) -> bool` |
@@ -135,7 +163,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of `data
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
-Environment variables also work: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`.
+Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`.
 
 ---
 
@@ -361,6 +389,7 @@ python examples/mistral_hello.py
 python examples/mistral_hello.py "Say hello in one line"
 
 python examples/session_chat.py          # multi-turn + resume(session_id)
+python examples/mongodb_session.py       # MongoDB create + resume (needs URI)
 python examples/tools_read_grep.py       # read + grep tools
 python examples/permissions_demo.py      # allow read/grep, deny write/bash
 python examples/stream_events.py "What is in README.md?"
@@ -371,7 +400,8 @@ python examples/cloud_worker.py . "List the top-level files"
 | Script | What it shows |
 |--------|----------------|
 | `mistral_hello.py` | Minimal Mistral key + small model |
-| `session_chat.py` | Return `session_id`, resume later |
+| `session_chat.py` | Return `session_id`, resume later (disk) |
+| `mongodb_session.py` | Same flow with `storage="mongodb"` + `user_id` |
 | `tools_read_grep.py` | Tool use with live events |
 | `permissions_demo.py` | `permission_callback` allow/deny |
 | `stream_events.py` | Token streaming to stdout |
@@ -390,13 +420,16 @@ from pi_sdk import (
     AgentEvent,
     AgentOptions,
     Config,
+    DiskSessionStore,
     EventType,
     Message,
     PermissionDecision,
     Role,
     RunResult,
     Session,
+    SessionStore,
     UsageSummary,
+    create_store,
     BUILTIN_PROVIDERS,
 )
 ```
@@ -422,15 +455,17 @@ sdk/
 │   ├── agent.py          # Agent.create / run / stream / resume
 │   ├── events.py         # EventType, AgentEvent
 │   ├── config.py         # AgentOptions, Config
-│   ├── memory.py         # sessions + data root
+│   ├── memory.py         # façade over SessionStore
 │   ├── models.py         # Message, Session, Role
-│   ├── tools.py          # tool implementations + schemas
+│   ├── paths.py          # data_dir / workspace helpers
+│   ├── storage/          # disk + mongodb backends
+│   ├── tools.py
 │   ├── permissions.py
 │   ├── compaction.py
 │   ├── skills.py
 │   ├── tokenizer.py
-│   ├── prompts/          # system prompt builder
-│   └── providers/        # OpenAI-compat + Vertex
+│   ├── prompts/
+│   └── providers/
 ├── examples/
 ├── pyproject.toml
 └── README.md

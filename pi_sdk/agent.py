@@ -18,12 +18,14 @@ from pi_sdk.history_stub import (
     stub_assistant_tool_call,
     tool_succeeded,
 )
-from pi_sdk.memory import Memory, get_workspace, set_data_root, set_workspace
+from pi_sdk.memory import Memory
+from pi_sdk.paths import get_workspace, set_data_root, set_workspace
 from pi_sdk.models import Message, Role, Session
 from pi_sdk.permissions import PermissionDecision, PermissionManager
 from pi_sdk.providers import create_provider
 from pi_sdk.providers.base import LLMProvider, StreamHandler
 from pi_sdk.skills import Skills
+from pi_sdk.storage import create_store
 from pi_sdk.tools import (
     TOOLS,
     execute_bash,
@@ -184,7 +186,14 @@ class Agent:
                 pass
 
         self.prompt = prompts.Prompt()
-        self.memory = Memory()
+        store = create_store(
+            config.storage or "disk",
+            data_dir=config.data_dir,
+            mongodb_uri=config.mongodb_uri,
+            mongodb_db=config.mongodb_db or "pi_sdk",
+            store=config.store,
+        )
+        self.memory = Memory(store=store, user_id=config.user_id)
         self.llm: LLMProvider | None = self._create_provider()
         self.manual_skill_names: Optional[list[str]] = config.skill_names
         self._pending_prompt_tokens = 0
@@ -221,6 +230,11 @@ class Agent:
         autonomous: bool = True,
         permission_callback: Any = None,
         on_event: EventCallback | None = None,
+        storage: str = "disk",
+        mongodb_uri: str | None = None,
+        mongodb_db: str = "pi_sdk",
+        user_id: str | None = None,
+        store: Any = None,
         **kwargs: Any,
     ) -> "Agent":
         """
@@ -229,6 +243,14 @@ class Agent:
         Example:
             agent = Agent.create(api_key="...", provider="mistral", cwd=".")
             result = agent.run("Fix the failing tests")
+
+            # MongoDB sessions:
+            agent = Agent.create(
+                api_key="...",
+                storage="mongodb",
+                mongodb_uri="mongodb://localhost:27017",
+                user_id="user_42",
+            )
         """
         options = AgentOptions(
             api_key=api_key,
@@ -241,6 +263,11 @@ class Agent:
             tavily_api_key=tavily_api_key,
             autonomous=autonomous,
             permission_callback=permission_callback,
+            storage=storage,
+            mongodb_uri=mongodb_uri,
+            mongodb_db=mongodb_db,
+            user_id=user_id,
+            store=store,
             **{
                 k: v
                 for k, v in kwargs.items()
@@ -383,7 +410,7 @@ class Agent:
         self.memory.session = session
         self.current_session = session
         sys_prompt = self.prompt.get_system_prompt(cwd=str(session.workspace))
-        self.memory.load_session_chat(session.history_path, system_prompt=sys_prompt)
+        self.memory.load_session_chat(session, system_prompt=sys_prompt)
         return self
 
     def new_session(self, title: str = "session") -> Session:
@@ -444,11 +471,7 @@ class Agent:
         if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
             self.memory.messages[0].content = sys_prompt
             if self.memory.session:
-                self.memory.write_to_jsonl(
-                    self.memory.session.history_path,
-                    self.memory.messages,
-                    mode="w",
-                )
+                self.memory.replace_messages()
 
     def select_relevant_skills(self, user_query: str) -> list[str]:
         available = Skills.names()
@@ -516,25 +539,15 @@ class Agent:
         return 128000
 
     def _append_message(self, msg: Message) -> None:
-        self.memory.messages.append(msg)
-        if self.memory.session:
-            self.memory.write_to_jsonl(
-                self.memory.session.history_path, [msg], mode="a"
-            )
+        self.memory.append_message(msg)
 
     def _rewrite_session_history(self) -> None:
-        session = self.memory.session
-        if not session:
+        if not self.memory.session:
             return
-        self.memory.write_to_jsonl(
-            session.history_path, self.memory.messages, mode="w"
-        )
+        self.memory.replace_messages()
 
     def _persist_session_usage(self) -> None:
-        session = self.memory.session
-        if not session:
-            return
-        self.memory.write_to_json(session.history_path.parent / "metadata.json", session)
+        self.memory.save_session()
 
     def _flush_pending_usage(self) -> None:
         session = self.memory.session
@@ -752,9 +765,7 @@ class Agent:
                 self.memory.messages[0].content += (
                     f"\n\n{self.config.system_prompt_extra}"
                 )
-            self.memory.write_to_jsonl(
-                session.history_path, self.memory.messages, mode="w"
-            )
+            self.memory.replace_messages()
         self._flush_pending_usage()
         return session
 
