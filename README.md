@@ -2,23 +2,25 @@
 
 Headless Python coding-agent SDK. Embed an agent in a backend, cloud worker, CI job, or automation — **no CLI, no Rich UI**.
 
-Built from the same core as the PI harness: tools, providers, sessions, compaction, skills, permissions.
+Built from the same core ideas as the **[PI harness](https://github.com/Abhishekkkk-15/pi)** (the local CLI coding agent): tools, providers, sessions, compaction, skills, and permissions — packaged for programmatic use.
 
 | | |
 |---|---|
 | Package | `pi-sdk` (`import pi_sdk`) |
 | Python | 3.11+ |
 | Entry | `Agent.create` → `run` / `stream` / `resume` |
+| Related | [PI harness (CLI)](https://github.com/Abhishekkkk-15/pi) |
 
 ---
 
 ## Install
 
 ```bash
-cd sdk
 pip install -e .
 # or
 uv pip install -e .
+# optional MongoDB backend:
+pip install -e ".[mongodb]"
 ```
 
 Requirements (pulled in automatically): `openai`, `python-dotenv`, `tokenizers`, `tavily-python`, `google-genai`.
@@ -484,6 +486,7 @@ from pi_sdk import (
     RunResult,
     Session,
     SessionStore,
+    ToolSpec,
     UsageSummary,
     create_store,
     BUILTIN_PROVIDERS,
@@ -505,7 +508,7 @@ from pi_sdk import (
 ## Package layout
 
 ```
-sdk/
+pi-sdk/
 ├── pi_sdk/
 │   ├── __init__.py       # public API
 │   ├── agent.py          # Agent.create / run / stream / resume
@@ -515,6 +518,7 @@ sdk/
 │   ├── models.py         # Message, Session, Role
 │   ├── paths.py          # data_dir / workspace helpers
 │   ├── storage/          # disk + mongodb backends
+│   ├── tool_registry.py  # builtins + custom tools
 │   ├── tools.py
 │   ├── permissions.py
 │   ├── compaction.py
@@ -527,19 +531,31 @@ sdk/
 └── README.md
 ```
 
-The parent repo CLI (`../agent.py`, `../console.py`, …) is separate. This package under `sdk/` is standalone.
+This repo is the **SDK only**. For the interactive terminal agent, see the **[PI harness](https://github.com/Abhishekkkk-15/pi)**.
 
 ---
 
-## Relation to the CLI
+## Relation to the PI harness
 
-| | CLI (repo root) | SDK (`sdk/`) |
+The [PI harness](https://github.com/Abhishekkkk-15/pi) is the local CLI (`pi-python`) with a Rich UI and slash commands. **PI SDK** is the headless library you embed in your own apps.
+
+| | [PI harness](https://github.com/Abhishekkkk-15/pi) | PI SDK (this repo) |
 |--|-----------------|--------------|
 | UI | Rich + slash commands | None |
 | Auth | `/login`, `auth.json` | `Agent.create(api_key=...)` |
 | Permissions | Interactive prompts | `autonomous` / callback |
-| Sessions | `.pi-python` | `.pi-sdk` (configurable) |
+| Sessions | `.pi-python` | `.pi-sdk` / MongoDB (configurable) |
+| Custom tools | Built-ins in CLI | `add_tool` / `extra_tools` |
 | Use case | Local terminal | Backend / cloud / embed |
+
+```bash
+# CLI harness
+git clone https://github.com/Abhishekkkk-15/pi.git
+
+# This SDK
+pip install pi-sdk
+# or: uv add pi-sdk
+```
 
 ---
 
