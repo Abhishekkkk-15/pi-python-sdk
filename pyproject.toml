@@ -1,0 +1,30 @@
+[project]
+name = "pi-sdk"
+version = "0.1.0"
+description = "Headless Python coding-agent SDK (tools, providers, sessions) — no CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "PI" }]
+keywords = ["agent", "coding", "llm", "sdk", "tools"]
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "openai>=1.0.0",
+    "tavily-python>=0.5.0",
+    "tokenizers>=0.20.0",
+    "google-genai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pi_sdk*"]
+
+[tool.setuptools.package-data]
+pi_sdk = ["prompts/*.md"]

@@ -1,0 +1,10 @@
+pi_sdk.egg-info/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+.pytest_cache/
+.pi-sdk/
+.env

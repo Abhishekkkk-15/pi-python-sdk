@@ -1,0 +1,992 @@
+"""Headless PI coding agent — create / run / stream / resume."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator, Optional
+
+from pi_sdk import prompts
+from pi_sdk.compaction import Compaction
+from pi_sdk.config import BUILTIN_PROVIDERS, AgentOptions, Config, estimate_cost
+from pi_sdk.events import AgentEvent, EventCallback, EventEmitter, EventType
+from pi_sdk.history_stub import (
+    age_out_large_payloads,
+    stub_assistant_tool_call,
+    tool_succeeded,
+)
+from pi_sdk.memory import Memory, get_workspace, set_data_root, set_workspace
+from pi_sdk.models import Message, Role, Session
+from pi_sdk.permissions import PermissionDecision, PermissionManager
+from pi_sdk.providers import create_provider
+from pi_sdk.providers.base import LLMProvider, StreamHandler
+from pi_sdk.skills import Skills
+from pi_sdk.tools import (
+    TOOLS,
+    execute_bash,
+    execute_edit,
+    execute_grep,
+    execute_read,
+    execute_web_search,
+    execute_write,
+)
+
+
+class AgentError(Exception):
+    """Base SDK error."""
+
+
+class AuthenticationError(AgentError):
+    """Missing or invalid API credentials."""
+
+
+class PermissionDenied(AgentError):
+    """Tool execution was denied by the permission policy."""
+
+
+KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.4-mini": 400000,
+    "gpt-5.4": 400000,
+    "gpt-5-mini": 400000,
+    "gpt-5": 400000,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "o1": 200000,
+    "o3-mini": 200000,
+    "mistral-large-latest": 128000,
+    "mistral-small-latest": 32768,
+    "llama-3.3-70b-versatile": 128000,
+    "gemini-2.5-flash": 1000000,
+    "gemini-2.5-pro": 1000000,
+}
+
+
+def sanitize_api_messages(raw_messages: list[dict]) -> list[dict]:
+    sanitized: list[dict] = []
+    i = 0
+    n = len(raw_messages)
+    while i < n:
+        msg = raw_messages[i]
+        role = msg.get("role")
+        if role == "assistant" and msg.get("tool_calls"):
+            tool_calls = msg.get("tool_calls") or []
+            expected_ids = []
+            for tc in tool_calls:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id:
+                    expected_ids.append(tc_id)
+            sanitized.append(msg)
+            i += 1
+            tool_responses_by_id = {}
+            while i < n and raw_messages[i].get("role") == "tool":
+                tool_msg = raw_messages[i]
+                t_id = tool_msg.get("tool_call_id")
+                if t_id:
+                    tool_responses_by_id[t_id] = tool_msg
+                i += 1
+            for t_id in expected_ids:
+                if t_id in tool_responses_by_id:
+                    sanitized.append(tool_responses_by_id[t_id])
+                else:
+                    sanitized.append(
+                        {
+                            "role": "tool",
+                            "content": "Tool execution was interrupted.",
+                            "tool_call_id": t_id,
+                        }
+                    )
+        elif role == "tool":
+            i += 1
+        else:
+            sanitized.append(msg)
+            i += 1
+    return sanitized
+
+
+@dataclass
+class UsageSummary:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+@dataclass
+class RunResult:
+    """Outcome of a single agent.run(...) call."""
+
+    status: str = "ok"  # ok | error | cancelled
+    text: str = ""
+    reasoning: str | None = None
+    session_id: str | None = None
+    usage: UsageSummary = field(default_factory=UsageSummary)
+    events: list[AgentEvent] = field(default_factory=list)
+    error: str | None = None
+    messages: list[Message] = field(default_factory=list)
+
+
+class _EventStreamHandler(StreamHandler):
+    def __init__(self, emitter: EventEmitter) -> None:
+        self.emitter = emitter
+        self._thinking: list[str] = []
+        self._content: list[str] = []
+
+    def thinking_start(self) -> None:
+        self._thinking.clear()
+
+    def thinking_chunk(self, text: str) -> None:
+        self._thinking.append(text)
+        self.emitter.emit(EventType.THINKING_DELTA, text=text)
+
+    def thinking_end(self) -> None:
+        full = "".join(self._thinking)
+        if full:
+            self.emitter.emit(EventType.THINKING, text=full)
+
+    def content_start(self) -> None:
+        self._content.clear()
+
+    def content_chunk(self, text: str) -> None:
+        self._content.append(text)
+        self.emitter.emit(EventType.TEXT_DELTA, text=text)
+
+    def content_end(self) -> None:
+        full = "".join(self._content)
+        if full:
+            self.emitter.emit(EventType.TEXT, text=full)
+
+    def tool_args_progress(self, names: str, kb: float) -> None:
+        self.emitter.emit(
+            EventType.STATUS,
+            message=f"Generating arguments for {names} ({kb:.1f} KB)",
+        )
+
+    def stop_loading(self) -> None:
+        return None
+
+
+class Agent:
+    """Programmatic coding agent (no CLI)."""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        if config.data_dir:
+            set_data_root(config.data_dir)
+        if config.cwd:
+            set_workspace(config.cwd)
+            try:
+                os.chdir(get_workspace())
+            except OSError:
+                pass
+
+        self.prompt = prompts.Prompt()
+        self.memory = Memory()
+        self.llm: LLMProvider | None = self._create_provider()
+        self.manual_skill_names: Optional[list[str]] = config.skill_names
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
+        self._pending_total_tokens = 0
+        self._pending_cached_tokens = 0
+        self._emitter = EventEmitter()
+        self.current_session: Session | None = None
+
+        sys_prompt = self.prompt.get_system_prompt(cwd=str(get_workspace()))
+        if config.system_prompt_extra:
+            sys_prompt = f"{sys_prompt}\n\n{config.system_prompt_extra}"
+        self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
+
+        if self.manual_skill_names:
+            self.apply_active_skills(list(self.manual_skill_names))
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        api_key: str | None = None,
+        api_keys: list[str] | None = None,
+        provider: str = "mistral",
+        model: str | None = None,
+        base_url: str | None = None,
+        cwd: str | Path | None = None,
+        data_dir: str | Path | None = None,
+        tavily_api_key: str | None = None,
+        autonomous: bool = True,
+        permission_callback: Any = None,
+        on_event: EventCallback | None = None,
+        **kwargs: Any,
+    ) -> "Agent":
+        """
+        Create a configured agent.
+
+        Example:
+            agent = Agent.create(api_key="...", provider="mistral", cwd=".")
+            result = agent.run("Fix the failing tests")
+        """
+        options = AgentOptions(
+            api_key=api_key,
+            api_keys=list(api_keys or []),
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            cwd=str(cwd) if cwd is not None else None,
+            data_dir=str(data_dir) if data_dir is not None else None,
+            tavily_api_key=tavily_api_key,
+            autonomous=autonomous,
+            permission_callback=permission_callback,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k
+                in {
+                    "compaction_enabled",
+                    "compact_at_tokens",
+                    "keep_recent_tokens",
+                    "max_tokens",
+                    "reasoning_effort",
+                    "input_price_per_mtok",
+                    "output_price_per_mtok",
+                    "max_history_messages",
+                    "skill_names",
+                    "system_prompt_extra",
+                }
+            },
+        )
+        agent = cls(Config.from_options(options))
+        if on_event is not None:
+            agent._emitter._on_event = on_event
+        if not agent.config.api_key and agent.config.provider != "vertex":
+            raise AuthenticationError(
+                "No API key configured. Pass api_key= to Agent.create "
+                "or set LLM_KEY / OPENAI_API_KEY."
+            )
+        return agent
+
+    def on_event(self, callback: EventCallback | None) -> None:
+        self._emitter._on_event = callback
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def send(self, prompt: str, *, collect_events: bool = False) -> RunResult:
+        """Alias for run()."""
+        return self.run(prompt, collect_events=collect_events)
+
+    def run(self, prompt: str, *, collect_events: bool = False) -> RunResult:
+        """Run one user turn to completion (tool loop included)."""
+        self._emitter.collect = collect_events
+        self._emitter.drain()
+        try:
+            choice = self._chat(prompt)
+            session = self.memory.session
+            usage = UsageSummary()
+            if session:
+                usage = UsageSummary(
+                    prompt_tokens=session.prompt_tokens,
+                    completion_tokens=session.completion_tokens,
+                    total_tokens=session.total_tokens,
+                    cached_tokens=session.cached_tokens,
+                    estimated_cost_usd=session.estimated_cost_usd,
+                )
+            if choice is None:
+                result = RunResult(
+                    status="error",
+                    text="",
+                    session_id=session.id if session else None,
+                    usage=usage,
+                    events=self._emitter.drain() if collect_events else [],
+                    error="Run failed or returned no assistant message",
+                    messages=list(self.memory.messages),
+                )
+                self._emitter.emit(
+                    EventType.RUN_FAILED,
+                    error=result.error,
+                    session_id=result.session_id,
+                )
+                return result
+
+            text = (choice.message.content or "") if choice else ""
+            reasoning = getattr(choice.message, "reasoning_content", None) if choice else None
+            result = RunResult(
+                status="ok",
+                text=text,
+                reasoning=reasoning,
+                session_id=session.id if session else None,
+                usage=usage,
+                events=self._emitter.drain() if collect_events else [],
+                messages=list(self.memory.messages),
+            )
+            self._emitter.emit(
+                EventType.RUN_COMPLETED,
+                text=result.text,
+                session_id=result.session_id,
+            )
+            return result
+        except Exception as exc:
+            self._emitter.emit(EventType.RUN_FAILED, error=str(exc))
+            session = self.memory.session
+            return RunResult(
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
+                session_id=session.id if session else None,
+                events=self._emitter.drain() if collect_events else [],
+                messages=list(self.memory.messages),
+            )
+        finally:
+            self._emitter.collect = False
+
+    def stream(self, prompt: str) -> Iterator[AgentEvent]:
+        """
+        Yield events while running a turn.
+
+        Events are buffered via an internal collector and flushed after the
+        run completes (providers stream deltas through on_event during the run
+        when you also set Agent.on_event / create(on_event=...)).
+
+        For live streaming, prefer:
+            Agent.create(..., on_event=handler)
+            agent.run(prompt)
+        or pass on_event and iterate collected events with collect_events=True.
+        """
+        collected: list[AgentEvent] = []
+
+        def _capture(event: AgentEvent) -> None:
+            collected.append(event)
+            prev = getattr(self, "_user_on_event", None)
+            if prev:
+                prev(event)
+
+        prev_cb = self._emitter._on_event
+        self._user_on_event = prev_cb
+        self._emitter._on_event = _capture
+        try:
+            self.run(prompt, collect_events=False)
+            yield from collected
+        finally:
+            self._emitter._on_event = prev_cb
+            self._user_on_event = None
+
+    def resume(self, session_id: str) -> "Agent":
+        """Load an existing session into this agent and return self."""
+        session = self.memory.get_session_by_id(session_id)
+        if not session:
+            raise AgentError(f"Session not found: {session_id}")
+        set_workspace(session.workspace)
+        self.memory.session = session
+        self.current_session = session
+        sys_prompt = self.prompt.get_system_prompt(cwd=str(session.workspace))
+        self.memory.load_session_chat(session.history_path, system_prompt=sys_prompt)
+        return self
+
+    def new_session(self, title: str = "session") -> Session:
+        """Start a fresh session (keeps config / provider)."""
+        self.reset_conversation()
+        session = self.memory.init_session(
+            title,
+            initial_messages=self.memory.messages,
+            workspace=get_workspace(),
+        )
+        self.current_session = session
+        return session
+
+    def reset_conversation(self) -> None:
+        self.memory.session = None
+        self.current_session = None
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
+        self._pending_total_tokens = 0
+        self._pending_cached_tokens = 0
+        sys_prompt = self.prompt.get_system_prompt(cwd=str(get_workspace()))
+        if self.config.system_prompt_extra:
+            sys_prompt = f"{sys_prompt}\n\n{self.config.system_prompt_extra}"
+        self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
+        if self.manual_skill_names:
+            self.apply_active_skills(list(self.manual_skill_names))
+
+    def list_sessions(self) -> list[Session]:
+        return self.memory.load_old_sessions()
+
+    @property
+    def session_id(self) -> str | None:
+        return self.memory.session.id if self.memory.session else None
+
+    @property
+    def messages(self) -> list[Message]:
+        return list(self.memory.messages)
+
+    # ------------------------------------------------------------------
+    # Skills
+    # ------------------------------------------------------------------
+
+    def apply_active_skills(self, skill_names: list[str]) -> None:
+        workspace = (
+            self.memory.session.workspace
+            if self.memory.session
+            else get_workspace()
+        )
+        if skill_names:
+            active = Skills.load_many(skill_names)
+            sys_prompt = self.prompt.get_system_prompt(
+                active_skills=active, cwd=str(workspace)
+            )
+        else:
+            sys_prompt = self.prompt.get_system_prompt(cwd=str(workspace))
+        if self.config.system_prompt_extra:
+            sys_prompt = f"{sys_prompt}\n\n{self.config.system_prompt_extra}"
+        if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
+            self.memory.messages[0].content = sys_prompt
+            if self.memory.session:
+                self.memory.write_to_jsonl(
+                    self.memory.session.history_path,
+                    self.memory.messages,
+                    mode="w",
+                )
+
+    def select_relevant_skills(self, user_query: str) -> list[str]:
+        available = Skills.names()
+        if not available:
+            return []
+        prompt_str = (
+            f"You are a skill selection system for an AI coding assistant.\n"
+            f'User Task: "{user_query}"\n\n'
+            f"Available Skills: {available}\n\n"
+            f"Select which skill names from the Available Skills list are relevant.\n"
+            f"Max 3 skills. Return ONLY a JSON array, e.g. [\"react\"]. "
+            f"If none, return []."
+        )
+        try:
+            response = self._create_completion(
+                messages=[{"role": "user", "content": prompt_str}],
+                use_tools=False,
+                stream=False,
+            )
+            self._record_usage(response)
+            content = (response.choices[0].message.content or "").strip()
+            match = re.search(r"\[.*?\]", content, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, list):
+                    return [s for s in parsed if isinstance(s, str) and s in available]
+            return []
+        except Exception:
+            q_lower = user_query.lower()
+            return [s for s in available if s.lower() in q_lower]
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _create_provider(self) -> LLMProvider | None:
+        endpoint = (
+            self.config.base_url
+            or BUILTIN_PROVIDERS.get(self.config.provider, {}).get("base_url")
+            or "https://api.openai.com/v1"
+        )
+        return create_provider(
+            name=self.config.provider,
+            api_key=self.config.api_key,
+            base_url=endpoint,
+        )
+
+    @property
+    def model_name(self) -> str:
+        return str(self.config.model)
+
+    def get_model_context_window(self, model_name: str | None = None) -> int:
+        target = (model_name or self.model_name).strip().lower()
+        if target in KNOWN_MODEL_CONTEXT_WINDOWS:
+            return KNOWN_MODEL_CONTEXT_WINDOWS[target]
+        for key in sorted(KNOWN_MODEL_CONTEXT_WINDOWS.keys(), key=len, reverse=True):
+            if key in target or target in key:
+                return KNOWN_MODEL_CONTEXT_WINDOWS[key]
+        m_match = re.search(r"(\d+)\s*m\b", target)
+        if m_match:
+            return int(m_match.group(1)) * 1_000_000
+        k_match = re.search(r"(\d+)\s*k\b", target)
+        if k_match:
+            return int(k_match.group(1)) * 1_000
+        return 128000
+
+    def _append_message(self, msg: Message) -> None:
+        self.memory.messages.append(msg)
+        if self.memory.session:
+            self.memory.write_to_jsonl(
+                self.memory.session.history_path, [msg], mode="a"
+            )
+
+    def _rewrite_session_history(self) -> None:
+        session = self.memory.session
+        if not session:
+            return
+        self.memory.write_to_jsonl(
+            session.history_path, self.memory.messages, mode="w"
+        )
+
+    def _persist_session_usage(self) -> None:
+        session = self.memory.session
+        if not session:
+            return
+        self.memory.write_to_json(session.history_path.parent / "metadata.json", session)
+
+    def _flush_pending_usage(self) -> None:
+        session = self.memory.session
+        if not session:
+            return
+        if not (
+            self._pending_total_tokens
+            or self._pending_prompt_tokens
+            or self._pending_completion_tokens
+            or self._pending_cached_tokens
+        ):
+            return
+        session.prompt_tokens += self._pending_prompt_tokens
+        session.completion_tokens += self._pending_completion_tokens
+        session.total_tokens += self._pending_total_tokens
+        session.cached_tokens += self._pending_cached_tokens
+        session.estimated_cost_usd += estimate_cost(
+            self._pending_prompt_tokens,
+            self._pending_completion_tokens,
+            self.config.input_price_per_mtok,
+            self.config.output_price_per_mtok,
+            self._pending_cached_tokens,
+            self.config.provider,
+        )
+        self._pending_prompt_tokens = 0
+        self._pending_completion_tokens = 0
+        self._pending_total_tokens = 0
+        self._pending_cached_tokens = 0
+        self._persist_session_usage()
+
+    def _record_usage(self, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        if isinstance(usage, dict):
+            prompt = int(usage.get("prompt_tokens") or 0)
+            completion = int(usage.get("completion_tokens") or 0)
+            total = int(usage.get("total_tokens") or (prompt + completion))
+            cached = int(usage.get("cached_tokens") or 0)
+        else:
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion = int(getattr(usage, "completion_tokens", 0) or 0)
+            total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
+            cached = int(getattr(usage, "cached_tokens", 0) or 0)
+
+        if prompt == 0 and completion == 0 and total == 0 and cached == 0:
+            return
+
+        session = self.memory.session
+        if session is None:
+            self._pending_prompt_tokens += prompt
+            self._pending_completion_tokens += completion
+            self._pending_total_tokens += total
+            self._pending_cached_tokens += cached
+            return
+
+        session.prompt_tokens += prompt
+        session.completion_tokens += completion
+        session.total_tokens += total
+        session.cached_tokens += cached
+        session.estimated_cost_usd += estimate_cost(
+            prompt,
+            completion,
+            self.config.input_price_per_mtok,
+            self.config.output_price_per_mtok,
+            cached,
+            self.config.provider,
+        )
+        self._persist_session_usage()
+        self._emitter.emit(
+            EventType.USAGE,
+            prompt_tokens=session.prompt_tokens,
+            completion_tokens=session.completion_tokens,
+            total_tokens=session.total_tokens,
+            estimated_cost_usd=session.estimated_cost_usd,
+        )
+
+    def _compaction(self) -> Compaction:
+        return Compaction(
+            compact_at_tokens=self.config.compact_at_tokens,
+            keep_recent_tokens=self.config.keep_recent_tokens,
+            provider=self.config.provider,
+        )
+
+    def _build_api_messages(self) -> list[dict]:
+        comp = self._compaction()
+        working = comp.working_messages(self.memory.messages, self.memory.session)
+        return sanitize_api_messages([m.to_dict() for m in working])
+
+    def run_compaction(self, *, force: bool = False) -> str:
+        session = self.memory.session
+        if not session:
+            return "No active session."
+        if not force and not self.config.compaction_enabled:
+            return "Compaction is disabled."
+        comp = self._compaction()
+        if not force and not comp.should_compact(self.memory.messages, session):
+            return "Below threshold — nothing to compact."
+        planned = comp.plan_segment(self.memory.messages, session)
+        if not planned:
+            return "Nothing new to fold."
+        segment, new_until, keep_used = planned
+        self._emitter.emit(
+            EventType.COMPACTION,
+            message=f"Compacting {len(segment)} message(s)...",
+        )
+        prompt = comp.build_prompt(session.compaction_summary, segment)
+        try:
+            response = self._create_completion(
+                messages=[{"role": "user", "content": prompt}],
+                use_tools=False,
+                stream=False,
+            )
+            self._record_usage(response)
+            summary = (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            return f"Compaction failed: {e}"
+        if not summary:
+            return "Summarizer returned empty text."
+        session.compaction_summary = summary
+        session.compacted_until = new_until
+        self._persist_session_usage()
+        msg = (
+            f"Compacted through message {new_until} "
+            f"({len(segment)} folded; keep={keep_used})."
+        )
+        self._emitter.emit(EventType.COMPACTION, message=msg)
+        return msg
+
+    def _create_completion(
+        self,
+        messages: list[dict],
+        use_tools: bool = True,
+        stream: bool = True,
+    ) -> Any:
+        from pi_sdk.tokenizer import count_messages
+
+        def _estimate_usage(msgs: list[dict], completion_text: str):
+            msg_objs = [
+                Message(
+                    role=Role.from_val(m.get("role")),
+                    content=m.get("content") or "",
+                    name=m.get("name"),
+                    tool_calls=m.get("tool_calls"),
+                    tool_call_id=m.get("tool_call_id"),
+                )
+                for m in msgs
+            ]
+            _, prompt_tokens, _ = count_messages(
+                msg_objs, provider=self.config.provider
+            )
+            _, completion_tokens, _ = count_messages(
+                [Message(role=Role.ASSISTANT, content=completion_text)],
+                provider=self.config.provider,
+            )
+
+            class EstimatedUsage:
+                def __init__(self, prompt: int, completion: int) -> None:
+                    self.prompt_tokens = prompt
+                    self.completion_tokens = completion
+                    self.total_tokens = prompt + completion
+                    self.prompt_tokens_details = None
+                    self.cache_read_input_tokens = 0
+
+            return EstimatedUsage(prompt_tokens, completion_tokens)
+
+        def _run_once() -> tuple[Any, Optional[BaseException]]:
+            try:
+                if not self.llm:
+                    return None, AuthenticationError("No LLM client configured.")
+                handler = _EventStreamHandler(self._emitter) if stream else None
+                response = self.llm.complete(
+                    messages,
+                    model=self.model_name,
+                    tools=TOOLS if use_tools else None,
+                    max_tokens=self.config.max_tokens,
+                    reasoning_effort=self.config.reasoning_effort,
+                    stream_handler=handler,
+                    count_usage=_estimate_usage,
+                )
+                return response, None
+            except Exception as exc:
+                return None, exc
+
+        response, error = _run_once()
+        if error is None:
+            return response
+
+        if self.llm and self.llm.is_rate_limit(error) and self.config.rotate_api_key():
+            self.llm = self._create_provider()
+            self._emitter.emit(
+                EventType.STATUS,
+                message="Rotated API key after rate limit; retrying...",
+            )
+            response, error = _run_once()
+            if error is None:
+                return response
+
+        raise error  # type: ignore[misc]
+
+    def _ensure_session(self, user_query: str) -> Session:
+        if self.memory.session is not None:
+            return self.memory.session
+        session = self.memory.init_session(
+            user_query[:80] or "session",
+            initial_messages=self.memory.messages,
+            workspace=get_workspace(),
+        )
+        self.current_session = session
+        if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
+            self.memory.messages[0].content = self.prompt.get_system_prompt(
+                cwd=str(session.workspace)
+            )
+            if self.config.system_prompt_extra:
+                self.memory.messages[0].content += (
+                    f"\n\n{self.config.system_prompt_extra}"
+                )
+            self.memory.write_to_jsonl(
+                session.history_path, self.memory.messages, mode="w"
+            )
+        self._flush_pending_usage()
+        return session
+
+    def _chat(self, user_query: str) -> Any:
+        session = self._ensure_session(user_query)
+        self._emitter.emit(
+            EventType.RUN_STARTED,
+            prompt=user_query,
+            session_id=session.id,
+        )
+        self._emitter.emit(EventType.USER_MESSAGE, text=user_query)
+
+        available_skills = Skills.names()
+        if available_skills:
+            if self.manual_skill_names is not None:
+                selected = [n for n in self.manual_skill_names if n in available_skills]
+            else:
+                selected = self.select_relevant_skills(user_query)
+            self.apply_active_skills(selected)
+
+        self._append_message(Message(role=Role.USER, content=user_query))
+
+        while True:
+            if self.config.compaction_enabled:
+                self.run_compaction(force=False)
+            api_messages = self._build_api_messages()
+            try:
+                res = self._create_completion(api_messages, use_tools=True, stream=True)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {e}"
+                self._emitter.emit(EventType.ERROR, error=detail)
+                self._append_message(
+                    Message(role=Role.ASSISTANT, content=f"[LLM Error] {detail}")
+                )
+                return None
+
+            if not res or not res.choices:
+                self._emitter.emit(EventType.ERROR, error="LLM returned no choices")
+                return None
+
+            self._record_usage(res)
+            llm_res = res.choices[0]
+
+            reasoning = getattr(llm_res.message, "reasoning_content", None)
+            if reasoning and not getattr(llm_res.message, "already_printed", False):
+                self._emitter.emit(EventType.THINKING, text=reasoning)
+
+            if (
+                llm_res.message.tool_calls
+                and llm_res.message.content
+                and not getattr(llm_res.message, "already_printed", False)
+            ):
+                self._emitter.emit(EventType.TEXT, text=llm_res.message.content)
+
+            tool_calls_raw = llm_res.message.tool_calls
+            tool_calls_dicts = (
+                [tc.model_dump() for tc in tool_calls_raw] if tool_calls_raw else None
+            )
+            chat_msg = Message(
+                role=Role.ASSISTANT,
+                content=llm_res.message.content or "",
+                tool_calls=tool_calls_dicts,
+                reasoning_content=reasoning,
+            )
+            self._append_message(chat_msg)
+
+            if not llm_res.message.tool_calls:
+                return llm_res
+
+            history_dirty = False
+            for tool in llm_res.message.tool_calls:
+                tool_name = tool.function.name
+                tool_arguments = tool.function.arguments
+                self._emitter.emit(
+                    EventType.TOOL_CALL,
+                    name=tool_name,
+                    arguments=tool_arguments,
+                    id=getattr(tool, "id", None),
+                )
+                try:
+                    fn_output = self.dispatch_tool_call(tool_name, tool_arguments)
+                except Exception as e:
+                    fn_output = f"Error executing tool {tool_name}: {e}"
+                    self._emitter.emit(
+                        EventType.ERROR, error=fn_output, title="Tool Error"
+                    )
+                self._emitter.emit(
+                    EventType.TOOL_RESULT,
+                    name=tool_name,
+                    content=fn_output,
+                    id=getattr(tool, "id", None),
+                )
+
+                if tool_name in ("write", "edit") and tool_succeeded(fn_output):
+                    if stub_assistant_tool_call(
+                        chat_msg,
+                        tool_call_id=getattr(tool, "id", None),
+                        tool_name=tool_name,
+                    ):
+                        history_dirty = True
+
+                self._append_message(
+                    Message(
+                        role=Role.TOOL,
+                        name=tool_name,
+                        content=fn_output,
+                        tool_call_id=tool.id,
+                    )
+                )
+
+            if age_out_large_payloads(self.memory.messages, keep_recent=16):
+                history_dirty = True
+            if history_dirty:
+                self._rewrite_session_history()
+
+    def check_permission(self, tool_name: str, target: str, action_details: str) -> bool:
+        if PermissionManager.check_permission(
+            self.memory.session,
+            tool_name,
+            target,
+            self.config.autonomous_risk,
+        ):
+            return True
+
+        cb = self.config.permission_callback
+        if cb is not None:
+            self._emitter.emit(
+                EventType.PERMISSION_REQUEST,
+                tool=tool_name,
+                target=target,
+                details=action_details,
+            )
+            allowed = bool(cb(tool_name, target, action_details))
+            if allowed and self.memory.session:
+                # Treat callback approval as allow-once (caller can persist via session)
+                return True
+            return allowed
+
+        # Headless default without callback: deny (safe for cloud integrations)
+        self._emitter.emit(
+            EventType.PERMISSION_REQUEST,
+            tool=tool_name,
+            target=target,
+            details=action_details,
+            denied=True,
+        )
+        return False
+
+    def grant_permission(
+        self,
+        grant_type: str,
+        tool_name: str,
+        target: str,
+    ) -> None:
+        """Persist a permission grant on the active session."""
+        if not self.memory.session:
+            return
+        PermissionManager.save_permission_grant(
+            self.memory, self.memory.session, grant_type, tool_name, target
+        )
+
+    def dispatch_tool_call(self, tool_name: str, function_arguments: str) -> str:
+        args = json.loads(function_arguments)
+        if tool_name == "read":
+            path = args.get("path", "")
+            if not self.check_permission(
+                tool_name, path, f"Agent wants to read {path}"
+            ):
+                return "User permission denied"
+            return execute_read(path, offset=args.get("offset"), limit=args.get("limit"))
+
+        if tool_name == "write":
+            path = args.get("path", "")
+            if not self.check_permission(
+                tool_name, path, f"Agent wants to write to {path}"
+            ):
+                return "User permission denied"
+            return execute_write(path, args.get("content", ""))
+
+        if tool_name == "edit":
+            path = args.get("path", "")
+            if not self.check_permission(
+                tool_name, path, f"Agent wants to edit {path}"
+            ):
+                return "User permission denied"
+            return execute_edit(path, args.get("edits", []))
+
+        if tool_name == "bash":
+            cmd = args.get("command", "")
+            if not self.check_permission(
+                tool_name, cmd, f"Agent wants to run bash: {cmd}"
+            ):
+                return "User permission denied"
+            return execute_bash(
+                cmd,
+                timeout=args.get("timeout", 30),
+                is_background=args.get("is_background", False),
+            )
+
+        if tool_name == "web_search":
+            query = args.get("query", "")
+            if not self.check_permission(
+                tool_name, query, f"Agent wants to run web_search: '{query}'"
+            ):
+                return "User permission denied"
+            return execute_web_search(query, max_results=args.get("max_results", 5))
+
+        if tool_name == "grep":
+            pattern = args.get("pattern", "")
+            path = args.get("path", ".") or "."
+            if not self.check_permission(
+                tool_name, path, f"Agent wants to grep '{pattern}' in {path}"
+            ):
+                return "User permission denied"
+            return execute_grep(
+                pattern=pattern,
+                path=path,
+                glob=args.get("glob", "") or "",
+                case_insensitive=bool(args.get("case_insensitive", False)),
+                max_results=args.get("max_results", 50),
+            )
+
+        return f"Unknown tool: {tool_name}"
+
+
+# Re-export permission decision constants for SDK users
+__all__ = [
+    "Agent",
+    "AgentError",
+    "AuthenticationError",
+    "PermissionDenied",
+    "PermissionDecision",
+    "RunResult",
+    "UsageSummary",
+]
