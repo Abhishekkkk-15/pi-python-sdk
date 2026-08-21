@@ -195,8 +195,31 @@ class ToolRegistry:
         return name
 
 
-def build_builtin_registry() -> ToolRegistry:
-    """Register the default PI coding tools."""
+BUILTIN_TOOL_NAMES: tuple[str, ...] = (
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "web_search",
+    "grep",
+)
+
+
+def build_builtin_registry(
+    *,
+    enable_tools: Sequence[str] | None = None,
+    disable_tools: Sequence[str] | None = None,
+    default_tools: bool = True,
+) -> ToolRegistry:
+    """
+    Register default PI coding tools.
+
+    - default_tools=False → empty registry (custom tools only)
+    - enable_tools=["read", "grep"] → only those builtins (allowlist)
+    - disable_tools=["bash", "write"] → all builtins except these (denylist)
+    If both enable_tools and disable_tools are set, allowlist is applied first,
+    then denylist subtracts from it.
+    """
     from pi_sdk.tools import (
         TOOLS,
         execute_bash,
@@ -237,10 +260,28 @@ def build_builtin_registry() -> ToolRegistry:
     }
 
     registry = ToolRegistry()
+    if not default_tools and enable_tools is None:
+        return registry
+
+    if enable_tools is not None:
+        allowed = {str(n).strip() for n in enable_tools if str(n).strip()}
+    else:
+        allowed = set(BUILTIN_TOOL_NAMES)
+
+    disabled = {str(n).strip() for n in (disable_tools or []) if str(n).strip()}
+    allowed -= disabled
+
+    unknown = allowed - set(BUILTIN_TOOL_NAMES)
+    if unknown:
+        raise ValueError(
+            f"Unknown builtin tool(s): {sorted(unknown)}. "
+            f"Valid names: {list(BUILTIN_TOOL_NAMES)}"
+        )
+
     for item in TOOLS:
         fn = item.get("function") or {}
         name = fn.get("name")
-        if not name or name not in handlers:
+        if not name or name not in handlers or name not in allowed:
             continue
         registry.add(
             name,

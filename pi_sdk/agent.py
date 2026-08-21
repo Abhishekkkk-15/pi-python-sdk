@@ -192,7 +192,11 @@ class Agent:
         )
         self.memory = Memory(store=store, user_id=config.user_id)
         self.llm: LLMProvider | None = self._create_provider()
-        self.tools: ToolRegistry = build_builtin_registry()
+        self.tools: ToolRegistry = build_builtin_registry(
+            default_tools=bool(getattr(config, "default_tools", True)),
+            enable_tools=getattr(config, "enable_tools", None),
+            disable_tools=getattr(config, "disable_tools", None) or None,
+        )
         for spec in coalesce_extra_tools(getattr(config, "extra_tools", None)):
             self.tools.add_spec(spec, replace=True)
         self.manual_skill_names: Optional[list[str]] = config.skill_names
@@ -234,23 +238,19 @@ class Agent:
         user_id: str | None = None,
         store: Any = None,
         extra_tools: list[Any] | None = None,
+        default_tools: bool = True,
+        enable_tools: list[str] | None = None,
+        disable_tools: list[str] | None = None,
         **kwargs: Any,
     ) -> "Agent":
         """
         Create a configured agent.
 
-        Example:
-            agent = Agent.create(api_key="...", provider="mistral", cwd=".")
-            result = agent.run("Fix the failing tests")
+        Builtin tools (read/write/edit/bash/grep/web_search) can be filtered::
 
-            agent.add_tool(
-                name="get_weather",
-                description="Get current weather for a city",
-                parameters={
-                    "city": {"type": "string", "description": "City name"},
-                },
-                handler=lambda city: f"Weather in {city}: sunny",
-            )
+            Agent.create(..., disable_tools=["bash", "write"])
+            Agent.create(..., enable_tools=["read", "grep"])
+            Agent.create(..., default_tools=False)  # custom tools only
         """
         options = AgentOptions(
             api_key=api_key,
@@ -269,6 +269,9 @@ class Agent:
             user_id=user_id,
             store=store,
             extra_tools=list(extra_tools or []),
+            default_tools=default_tools,
+            enable_tools=list(enable_tools) if enable_tools is not None else None,
+            disable_tools=list(disable_tools or []),
             **{
                 k: v
                 for k, v in kwargs.items()
@@ -354,6 +357,26 @@ class Agent:
     def remove_tool(self, name: str, *, update_system_prompt: bool = True) -> bool:
         """Unregister a tool by name. Returns True if it existed."""
         removed = self.tools.remove(name)
+        if removed and update_system_prompt:
+            self._sync_system_prompt_tools()
+        return removed
+
+    def disable_tools(
+        self,
+        *names: str,
+        update_system_prompt: bool = True,
+    ) -> list[str]:
+        """
+        Remove one or more tools from this agent (builtins or custom).
+
+        Example::
+
+            agent.disable_tools("bash", "write", "web_search")
+        """
+        removed: list[str] = []
+        for name in names:
+            if self.tools.remove(str(name).strip()):
+                removed.append(str(name).strip())
         if removed and update_system_prompt:
             self._sync_system_prompt_tools()
         return removed

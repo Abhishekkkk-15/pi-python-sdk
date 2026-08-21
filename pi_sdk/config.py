@@ -134,6 +134,10 @@ class AgentOptions:
     # Injected SessionStore instance (not serialized); set via Agent.create(store=...)
     store: Any = None
     extra_tools: list[Any] = field(default_factory=list)
+    # Builtin tool filtering (see build_builtin_registry)
+    default_tools: bool = True
+    enable_tools: Optional[list[str]] = None
+    disable_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -165,6 +169,9 @@ class Config:
     user_id: Optional[str] = None
     store: Any = None
     extra_tools: list[Any] = field(default_factory=list)
+    default_tools: bool = True
+    enable_tools: Optional[list[str]] = None
+    disable_tools: list[str] = field(default_factory=list)
 
     @classmethod
     def from_options(cls, options: AgentOptions | None = None, **kwargs: Any) -> "Config":
@@ -231,6 +238,13 @@ class Config:
             user_id=getattr(opts, "user_id", None),
             store=getattr(opts, "store", None),
             extra_tools=list(getattr(opts, "extra_tools", None) or []),
+            default_tools=bool(getattr(opts, "default_tools", True)),
+            enable_tools=(
+                list(opts.enable_tools)
+                if getattr(opts, "enable_tools", None) is not None
+                else None
+            ),
+            disable_tools=list(getattr(opts, "disable_tools", None) or []),
         )
 
     def rotate_api_key(self) -> bool:

@@ -153,6 +153,9 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `user_id` | `str` | `None` | Tenant scope for create/list/resume |
 | `store` | `SessionStore` | `None` | Inject custom store (wins over `storage`) |
 | `extra_tools` | `list` | `[]` | `ToolSpec` / dicts registered at create |
+| `default_tools` | `bool` | `True` | Register builtin tools |
+| `enable_tools` | `list[str]` | `None` | Allowlist of builtin names |
+| `disable_tools` | `list[str]` | `[]` | Denylist of builtin names |
 | `tavily_api_key` | `str` | `TAVILY_API_KEY` | Enables `web_search` |
 | `autonomous` | `bool` | `True` | Skip permission checks |
 | `permission_callback` | `callable` | `None` | `(tool, target, details) -> bool` |
@@ -341,6 +344,24 @@ Agent.create(
 ```
 
 The model receives the tool **name**, **description**, and **parameters** schema on every completion. See `examples/custom_tool.py`.
+
+### Disable / select default tools
+
+Builtins are on by default: `read`, `write`, `edit`, `bash`, `grep`, `web_search` (`BUILTIN_TOOL_NAMES`).
+
+```python
+# Denylist — keep all builtins except these
+Agent.create(api_key="...", disable_tools=["bash", "write", "web_search"])
+
+# Allowlist — only these builtins
+Agent.create(api_key="...", enable_tools=["read", "grep"])
+
+# No builtins — only what you add via extra_tools / add_tool
+Agent.create(api_key="...", default_tools=False)
+
+# At runtime
+agent.disable_tools("bash", "write")
+```
 
 ---
 
