@@ -7,6 +7,17 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "PI" }]
 keywords = ["agent", "coding", "llm", "sdk", "tools"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "python-dotenv>=1.0.0",
     "openai>=1.0.0",
@@ -15,8 +26,13 @@ dependencies = [
     "google-genai>=1.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Abhishekkkk-15/pi-python-sdk"
+Repository = "https://github.com/Abhishekkkk-15/pi-python-sdk"
+Issues = "https://github.com/Abhishekkkk-15/pi-python-sdk/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "build>=1.0.0"]
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
