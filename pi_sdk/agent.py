@@ -26,14 +26,11 @@ from pi_sdk.providers import create_provider
 from pi_sdk.providers.base import LLMProvider, StreamHandler
 from pi_sdk.skills import Skills
 from pi_sdk.storage import create_store
-from pi_sdk.tools import (
-    TOOLS,
-    execute_bash,
-    execute_edit,
-    execute_grep,
-    execute_read,
-    execute_web_search,
-    execute_write,
+from pi_sdk.tool_registry import (
+    ToolRegistry,
+    ToolSpec,
+    build_builtin_registry,
+    coalesce_extra_tools,
 )
 
 
@@ -195,6 +192,9 @@ class Agent:
         )
         self.memory = Memory(store=store, user_id=config.user_id)
         self.llm: LLMProvider | None = self._create_provider()
+        self.tools: ToolRegistry = build_builtin_registry()
+        for spec in coalesce_extra_tools(getattr(config, "extra_tools", None)):
+            self.tools.add_spec(spec, replace=True)
         self.manual_skill_names: Optional[list[str]] = config.skill_names
         self._pending_prompt_tokens = 0
         self._pending_completion_tokens = 0
@@ -203,9 +203,7 @@ class Agent:
         self._emitter = EventEmitter()
         self.current_session: Session | None = None
 
-        sys_prompt = self.prompt.get_system_prompt(cwd=str(get_workspace()))
-        if config.system_prompt_extra:
-            sys_prompt = f"{sys_prompt}\n\n{config.system_prompt_extra}"
+        sys_prompt = self._build_system_prompt(cwd=str(get_workspace()))
         self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
 
         if self.manual_skill_names:
@@ -235,6 +233,7 @@ class Agent:
         mongodb_db: str = "pi_sdk",
         user_id: str | None = None,
         store: Any = None,
+        extra_tools: list[Any] | None = None,
         **kwargs: Any,
     ) -> "Agent":
         """
@@ -244,12 +243,13 @@ class Agent:
             agent = Agent.create(api_key="...", provider="mistral", cwd=".")
             result = agent.run("Fix the failing tests")
 
-            # MongoDB sessions:
-            agent = Agent.create(
-                api_key="...",
-                storage="mongodb",
-                mongodb_uri="mongodb://localhost:27017",
-                user_id="user_42",
+            agent.add_tool(
+                name="get_weather",
+                description="Get current weather for a city",
+                parameters={
+                    "city": {"type": "string", "description": "City name"},
+                },
+                handler=lambda city: f"Weather in {city}: sunny",
             )
         """
         options = AgentOptions(
@@ -268,6 +268,7 @@ class Agent:
             mongodb_db=mongodb_db,
             user_id=user_id,
             store=store,
+            extra_tools=list(extra_tools or []),
             **{
                 k: v
                 for k, v in kwargs.items()
@@ -298,6 +299,106 @@ class Agent:
 
     def on_event(self, callback: EventCallback | None) -> None:
         self._emitter._on_event = callback
+
+    # ------------------------------------------------------------------
+    # Custom tools
+    # ------------------------------------------------------------------
+
+    def add_tool(
+        self,
+        name: str,
+        *,
+        description: str,
+        parameters: dict[str, Any] | None = None,
+        handler: Any,
+        require_permission: bool = True,
+        permission_arg: str | None = None,
+        replace: bool = False,
+        update_system_prompt: bool = True,
+    ) -> ToolSpec:
+        """
+        Register an extra tool for this agent (name, description, JSON Schema params, handler).
+
+        Example::
+
+            agent.add_tool(
+                name="get_weather",
+                description="Return current weather for a city",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "City name"},
+                    },
+                    "required": ["city"],
+                },
+                handler=lambda city: f"Sunny in {city}",
+            )
+
+        ``parameters`` may also be a shorthand properties map::
+
+            {"city": {"type": "string", "description": "City name"}}
+        """
+        spec = self.tools.add(
+            name,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+            require_permission=require_permission,
+            permission_arg=permission_arg,
+            replace=replace,
+        )
+        if update_system_prompt:
+            self._sync_system_prompt_tools()
+        return spec
+
+    def remove_tool(self, name: str, *, update_system_prompt: bool = True) -> bool:
+        """Unregister a tool by name. Returns True if it existed."""
+        removed = self.tools.remove(name)
+        if removed and update_system_prompt:
+            self._sync_system_prompt_tools()
+        return removed
+
+    def list_tools(self) -> list[str]:
+        """Return registered tool names (built-ins + custom)."""
+        return self.tools.names()
+
+    def _build_system_prompt(
+        self,
+        *,
+        cwd: str | None = None,
+        active_skills: dict[str, str] | None = None,
+    ) -> str:
+        names = self.tools.names()
+        snippets = self.tools.descriptions()
+        prompt = self.prompt.get_system_prompt(
+            active_skills=active_skills,
+            cwd=cwd,
+            selected_tools=names,
+            tool_snippets=snippets,
+        )
+        if self.config.system_prompt_extra:
+            prompt = f"{prompt}\n\n{self.config.system_prompt_extra}"
+        return prompt
+
+    def _sync_system_prompt_tools(self) -> None:
+        workspace = (
+            str(self.memory.session.workspace)
+            if self.memory.session
+            else str(get_workspace())
+        )
+        # Preserve active skills block by re-reading current skill names if any
+        active = None
+        if self.manual_skill_names:
+            from pi_sdk.skills import Skills
+
+            active = Skills.load_many(
+                [n for n in self.manual_skill_names if Skills.exists(n)]
+            ) or None
+        sys_prompt = self._build_system_prompt(cwd=workspace, active_skills=active)
+        if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
+            self.memory.messages[0].content = sys_prompt
+            if self.memory.session:
+                self.memory.replace_messages()
 
     # ------------------------------------------------------------------
     # Public API
@@ -409,7 +510,7 @@ class Agent:
         set_workspace(session.workspace)
         self.memory.session = session
         self.current_session = session
-        sys_prompt = self.prompt.get_system_prompt(cwd=str(session.workspace))
+        sys_prompt = self._build_system_prompt(cwd=str(session.workspace))
         self.memory.load_session_chat(session, system_prompt=sys_prompt)
         return self
 
@@ -431,9 +532,7 @@ class Agent:
         self._pending_completion_tokens = 0
         self._pending_total_tokens = 0
         self._pending_cached_tokens = 0
-        sys_prompt = self.prompt.get_system_prompt(cwd=str(get_workspace()))
-        if self.config.system_prompt_extra:
-            sys_prompt = f"{sys_prompt}\n\n{self.config.system_prompt_extra}"
+        sys_prompt = self._build_system_prompt(cwd=str(get_workspace()))
         self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
         if self.manual_skill_names:
             self.apply_active_skills(list(self.manual_skill_names))
@@ -459,15 +558,11 @@ class Agent:
             if self.memory.session
             else get_workspace()
         )
-        if skill_names:
-            active = Skills.load_many(skill_names)
-            sys_prompt = self.prompt.get_system_prompt(
-                active_skills=active, cwd=str(workspace)
-            )
-        else:
-            sys_prompt = self.prompt.get_system_prompt(cwd=str(workspace))
-        if self.config.system_prompt_extra:
-            sys_prompt = f"{sys_prompt}\n\n{self.config.system_prompt_extra}"
+        active = Skills.load_many(skill_names) if skill_names else None
+        sys_prompt = self._build_system_prompt(
+            cwd=str(workspace),
+            active_skills=active or None,
+        )
         if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
             self.memory.messages[0].content = sys_prompt
             if self.memory.session:
@@ -722,7 +817,7 @@ class Agent:
                 response = self.llm.complete(
                     messages,
                     model=self.model_name,
-                    tools=TOOLS if use_tools else None,
+                    tools=self.tools.schemas() if use_tools else None,
                     max_tokens=self.config.max_tokens,
                     reasoning_effort=self.config.reasoning_effort,
                     stream_handler=handler,
@@ -758,13 +853,9 @@ class Agent:
         )
         self.current_session = session
         if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
-            self.memory.messages[0].content = self.prompt.get_system_prompt(
+            self.memory.messages[0].content = self._build_system_prompt(
                 cwd=str(session.workspace)
             )
-            if self.config.system_prompt_extra:
-                self.memory.messages[0].content += (
-                    f"\n\n{self.config.system_prompt_extra}"
-                )
             self.memory.replace_messages()
         self._flush_pending_usage()
         return session
@@ -928,67 +1019,28 @@ class Agent:
         )
 
     def dispatch_tool_call(self, tool_name: str, function_arguments: str) -> str:
-        args = json.loads(function_arguments)
-        if tool_name == "read":
-            path = args.get("path", "")
-            if not self.check_permission(
-                tool_name, path, f"Agent wants to read {path}"
-            ):
-                return "User permission denied"
-            return execute_read(path, offset=args.get("offset"), limit=args.get("limit"))
+        try:
+            args = json.loads(function_arguments) if function_arguments else {}
+        except json.JSONDecodeError:
+            return f"Error: invalid tool arguments JSON for {tool_name}"
+        if not isinstance(args, dict):
+            return f"Error: tool arguments must be a JSON object for {tool_name}"
 
-        if tool_name == "write":
-            path = args.get("path", "")
-            if not self.check_permission(
-                tool_name, path, f"Agent wants to write to {path}"
-            ):
-                return "User permission denied"
-            return execute_write(path, args.get("content", ""))
+        if not self.tools.has(tool_name):
+            return f"Unknown tool: {tool_name}"
 
-        if tool_name == "edit":
-            path = args.get("path", "")
-            if not self.check_permission(
-                tool_name, path, f"Agent wants to edit {path}"
-            ):
+        spec = self.tools.get(tool_name)
+        assert spec is not None
+        if spec.require_permission:
+            target = self.tools.permission_target(tool_name, args)
+            details = f"Agent wants to run {tool_name}: {target or args}"
+            if not self.check_permission(tool_name, target or tool_name, details):
                 return "User permission denied"
-            return execute_edit(path, args.get("edits", []))
 
-        if tool_name == "bash":
-            cmd = args.get("command", "")
-            if not self.check_permission(
-                tool_name, cmd, f"Agent wants to run bash: {cmd}"
-            ):
-                return "User permission denied"
-            return execute_bash(
-                cmd,
-                timeout=args.get("timeout", 30),
-                is_background=args.get("is_background", False),
-            )
-
-        if tool_name == "web_search":
-            query = args.get("query", "")
-            if not self.check_permission(
-                tool_name, query, f"Agent wants to run web_search: '{query}'"
-            ):
-                return "User permission denied"
-            return execute_web_search(query, max_results=args.get("max_results", 5))
-
-        if tool_name == "grep":
-            pattern = args.get("pattern", "")
-            path = args.get("path", ".") or "."
-            if not self.check_permission(
-                tool_name, path, f"Agent wants to grep '{pattern}' in {path}"
-            ):
-                return "User permission denied"
-            return execute_grep(
-                pattern=pattern,
-                path=path,
-                glob=args.get("glob", "") or "",
-                case_insensitive=bool(args.get("case_insensitive", False)),
-                max_results=args.get("max_results", 50),
-            )
-
-        return f"Unknown tool: {tool_name}"
+        try:
+            return self.tools.dispatch(tool_name, args)
+        except Exception as e:
+            return f"Error executing tool {tool_name}: {e}"
 
 
 # Re-export permission decision constants for SDK users
@@ -999,5 +1051,6 @@ __all__ = [
     "PermissionDenied",
     "PermissionDecision",
     "RunResult",
+    "ToolSpec",
     "UsageSummary",
 ]

@@ -133,6 +133,7 @@ class AgentOptions:
     user_id: Optional[str] = None
     # Injected SessionStore instance (not serialized); set via Agent.create(store=...)
     store: Any = None
+    extra_tools: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +164,7 @@ class Config:
     mongodb_db: str = "pi_sdk"
     user_id: Optional[str] = None
     store: Any = None
+    extra_tools: list[Any] = field(default_factory=list)
 
     @classmethod
     def from_options(cls, options: AgentOptions | None = None, **kwargs: Any) -> "Config":
@@ -228,6 +230,7 @@ class Config:
             mongodb_db=str(getattr(opts, "mongodb_db", None) or "pi_sdk"),
             user_id=getattr(opts, "user_id", None),
             store=getattr(opts, "store", None),
+            extra_tools=list(getattr(opts, "extra_tools", None) or []),
         )
 
     def rotate_api_key(self) -> bool:

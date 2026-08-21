@@ -150,6 +150,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `mongodb_db` | `str` | `"pi_sdk"` | Mongo database name |
 | `user_id` | `str` | `None` | Tenant scope for create/list/resume |
 | `store` | `SessionStore` | `None` | Inject custom store (wins over `storage`) |
+| `extra_tools` | `list` | `[]` | `ToolSpec` / dicts registered at create |
 | `tavily_api_key` | `str` | `TAVILY_API_KEY` | Enables `web_search` |
 | `autonomous` | `bool` | `True` | Skip permission checks |
 | `permission_callback` | `callable` | `None` | `(tool, target, details) -> bool` |
@@ -286,6 +287,59 @@ agent.grant_permission(PermissionDecision.ALWAYS_TOOL, "read", ".")
 | `grep` | Workspace search | glob, case fold |
 | `web_search` | Live web search | needs Tavily key |
 
+### Custom tools
+
+Register extra tools at runtime (or pass `extra_tools=` to `Agent.create`):
+
+```python
+agent = Agent.create(api_key="...", autonomous=True)
+
+agent.add_tool(
+    name="get_weather",
+    description="Get current weather for a city",
+    parameters={
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City name"},
+        },
+        "required": ["city"],
+    },
+    handler=lambda city: f"Sunny in {city}",
+)
+
+# Shorthand parameters (auto-wrapped as a JSON Schema object):
+agent.add_tool(
+    name="echo_upper",
+    description="Uppercase the text",
+    parameters={"text": {"type": "string", "description": "Input text"}},
+    handler=lambda text: text.upper(),
+)
+
+print(agent.list_tools())   # includes builtins + custom
+agent.remove_tool("echo_upper")
+```
+
+Or at create time:
+
+```python
+from pi_sdk import Agent, ToolSpec
+
+Agent.create(
+    api_key="...",
+    extra_tools=[
+        ToolSpec(
+            name="utc_now",
+            description="Current UTC time",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: "2026-01-01T00:00:00Z",
+            require_permission=False,
+        ),
+    ],
+)
+```
+
+The model receives the tool **name**, **description**, and **parameters** schema on every completion. See `examples/custom_tool.py`.
+
 ---
 
 ## Providers
@@ -389,6 +443,7 @@ python examples/mistral_hello.py
 python examples/mistral_hello.py "Say hello in one line"
 
 python examples/session_chat.py          # multi-turn + resume(session_id)
+python examples/custom_tool.py           # register custom tools
 python examples/mongodb_session.py       # MongoDB create + resume (needs URI)
 python examples/tools_read_grep.py       # read + grep tools
 python examples/permissions_demo.py      # allow read/grep, deny write/bash
@@ -401,6 +456,7 @@ python examples/cloud_worker.py . "List the top-level files"
 |--------|----------------|
 | `mistral_hello.py` | Minimal Mistral key + small model |
 | `session_chat.py` | Return `session_id`, resume later (disk) |
+| `custom_tool.py` | `add_tool` name/description/parameters/handler |
 | `mongodb_session.py` | Same flow with `storage="mongodb"` + `user_id` |
 | `tools_read_grep.py` | Tool use with live events |
 | `permissions_demo.py` | `permission_callback` allow/deny |
