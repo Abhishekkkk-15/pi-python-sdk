@@ -172,10 +172,27 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `max_tokens` | `int` | `None` | Completion cap |
 | `reasoning_effort` | `str` | `None` | `low` / `medium` / `high` |
 | `skill_names` | `list[str]` | `None` | Pin skills (skip auto-select) |
+| `base_prompt` | `str` | `None` | Replace opening identity paragraph only (tools/guidelines unchanged) |
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
 Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`.
+
+### Custom identity (`base_prompt`)
+
+Replace only the opening identity paragraph. Tools, guidelines, `AGENTS.md`, skills, date, and cwd are still assembled by the SDK:
+
+```python
+agent = Agent.create(
+    api_key="...",
+    base_prompt=(
+        "You are a senior security reviewer. "
+        "You help users by reading files, executing commands, editing code, and writing new files."
+    ),
+)
+```
+
+Use `system_prompt_extra` to append product-specific rules at the end. Default identity text is available as `pi_sdk.prompts.DEFAULT_BASE_PROMPT`.
 
 ---
 

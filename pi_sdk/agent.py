@@ -248,6 +248,7 @@ class Agent:
         default_tools: bool = True,
         enable_tools: list[str] | None = None,
         disable_tools: list[str] | None = None,
+        base_prompt: str | None = None,
         **kwargs: Any,
     ) -> "Agent":
         """
@@ -258,6 +259,16 @@ class Agent:
             Agent.create(..., disable_tools=["bash", "write"])
             Agent.create(..., enable_tools=["read", "grep"])
             Agent.create(..., default_tools=False)  # custom tools only
+
+        Override only the opening identity paragraph (tools/guidelines unchanged)::
+
+            Agent.create(
+                ...,
+                base_prompt=(
+                    "You are a senior security reviewer. "
+                    "You help users by reading files, executing commands, editing code, and writing new files."
+                ),
+            )
         """
         options = AgentOptions(
             api_key=api_key,
@@ -279,6 +290,7 @@ class Agent:
             default_tools=default_tools,
             enable_tools=list(enable_tools) if enable_tools is not None else None,
             disable_tools=list(disable_tools or []),
+            base_prompt=base_prompt,
             **{
                 k: v
                 for k, v in kwargs.items()
@@ -293,6 +305,7 @@ class Agent:
                     "output_price_per_mtok",
                     "max_history_messages",
                     "skill_names",
+                    "base_prompt",
                     "system_prompt_extra",
                 }
             },
@@ -405,6 +418,7 @@ class Agent:
             cwd=cwd,
             selected_tools=names,
             tool_snippets=snippets,
+            base_prompt=self.config.base_prompt,
         )
         if self.config.system_prompt_extra:
             prompt = f"{prompt}\n\n{self.config.system_prompt_extra}"

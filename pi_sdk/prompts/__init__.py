@@ -4,6 +4,19 @@ from importlib import resources
 from pathlib import Path
 from typing import Dict, Optional
 
+DEFAULT_BASE_PROMPT = (
+    "You are an expert coding assistant operating inside the PI coding-agent SDK. "
+    "You help users by reading files, executing commands, editing code, and writing new files."
+)
+
+
+def resolve_base_prompt(base_prompt: Optional[str] = None) -> str:
+    """Return custom base identity text or the SDK default."""
+    if base_prompt and base_prompt.strip():
+        return base_prompt.strip()
+    return DEFAULT_BASE_PROMPT
+
+
 class Prompt:
     def __init__(self):
         pass
@@ -24,6 +37,7 @@ class Prompt:
         selected_tools: Optional[list[str]] = None,
         tool_snippets: Optional[Dict[str, str]] = None,
         prompt_guidelines: Optional[list[str]] = None,
+        base_prompt: Optional[str] = None,
     ) -> str:
         """
         Builds the system prompt dynamically matching pi's system prompt architecture.
@@ -75,10 +89,10 @@ class Prompt:
 
         guidelines_formatted = "\n".join(f"- {g}" for g in guidelines_list)
 
-        # 3. Base Prompt Assembly
+        # 3. Base Prompt Assembly (identity paragraph — overridable via base_prompt)
+        identity = resolve_base_prompt(base_prompt)
         prompt = (
-            "You are an expert coding assistant operating inside the PI coding-agent SDK. "
-            "You help users by reading files, executing commands, editing code, and writing new files.\n\n"
+            f"{identity}\n\n"
             f"Available tools:\n{tools_list}\n\n"
             "In addition to the tools above, you may have access to other custom tools depending on the project.\n\n"
             f"Guidelines:\n{guidelines_formatted}"
