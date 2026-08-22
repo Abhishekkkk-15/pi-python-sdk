@@ -15,16 +15,15 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _require_pymongo():
+def _require_motor():
     try:
-        from pymongo import ASCENDING, MongoClient
-        from pymongo.collection import Collection
-        from pymongo.database import Database
+        from motor.motor_asyncio import AsyncIOMotorClient
+        from pymongo import ASCENDING
     except ImportError as e:
         raise ImportError(
-            "MongoDB storage requires pymongo. Install with: pip install pi-sdk[mongodb]"
+            "MongoDB storage requires motor. Install with: pip install pi-sdk[mongodb]"
         ) from e
-    return MongoClient, ASCENDING, Collection, Database
+    return AsyncIOMotorClient, ASCENDING
 
 
 def _message_to_doc(session_id: str, seq: int, msg: Message, user_id: str | None) -> dict:
@@ -116,19 +115,26 @@ class MongoSessionStore(SessionStore):
         sessions_collection: str = "sessions",
         messages_collection: str = "messages",
     ) -> None:
-        MongoClient, ASCENDING, _, _ = _require_pymongo()
+        AsyncIOMotorClient, ASCENDING = _require_motor()
         if not uri or not str(uri).strip():
             raise ValueError("mongodb_uri is required for MongoSessionStore")
-        self._client = MongoClient(uri)
+        self._client = AsyncIOMotorClient(uri)
         self._db = self._client[database]
         self._sessions = self._db[sessions_collection]
         self._messages = self._db[messages_collection]
-        self._sessions.create_index("user_id")
-        self._messages.create_index(
-            [("session_id", ASCENDING), ("seq", ASCENDING)], unique=True
-        )
+        self._indexes_ready = False
+        self._ascending = ASCENDING
 
-    def create_session(
+    async def _ensure_indexes(self) -> None:
+        if self._indexes_ready:
+            return
+        await self._sessions.create_index("user_id")
+        await self._messages.create_index(
+            [("session_id", self._ascending), ("seq", self._ascending)], unique=True
+        )
+        self._indexes_ready = True
+
+    async def create_session(
         self,
         *,
         title: str,
@@ -136,6 +142,7 @@ class MongoSessionStore(SessionStore):
         user_id: str | None = None,
         permissions: dict | None = None,
     ) -> Session:
+        await self._ensure_indexes()
         sid = generate_chat_id()
         now = _utc_now()
         session = Session(
@@ -153,84 +160,90 @@ class MongoSessionStore(SessionStore):
             created_at=now,
             updated_at=now,
         )
-        self._sessions.insert_one(_session_to_doc(session))
+        await self._sessions.insert_one(_session_to_doc(session))
         return session
 
-    def get_session(
+    async def get_session(
         self, session_id: str, *, user_id: str | None = None
     ) -> Session | None:
+        await self._ensure_indexes()
         query: dict[str, Any] = {"_id": session_id}
         if user_id is not None:
             query["user_id"] = user_id
-        data = self._sessions.find_one(query)
+        data = await self._sessions.find_one(query)
         if not data:
             return None
         return _doc_to_session(data)
 
-    def list_sessions(self, *, user_id: str | None = None) -> list[Session]:
+    async def list_sessions(self, *, user_id: str | None = None) -> list[Session]:
+        await self._ensure_indexes()
         query: dict[str, Any] = {}
         if user_id is not None:
             query["user_id"] = user_id
         cursor = self._sessions.find(query).sort("updated_at", -1)
-        return [_doc_to_session(doc) for doc in cursor]
+        return [_doc_to_session(doc) async for doc in cursor]
 
-    def save_session(self, session: Session) -> None:
+    async def save_session(self, session: Session) -> None:
+        await self._ensure_indexes()
         session.updated_at = _utc_now()
-        self._sessions.replace_one(
+        await self._sessions.replace_one(
             {"_id": session.id}, _session_to_doc(session), upsert=True
         )
 
-    def load_messages(self, session_id: str) -> list[Message]:
+    async def load_messages(self, session_id: str) -> list[Message]:
+        await self._ensure_indexes()
         cursor = self._messages.find({"session_id": session_id}).sort("seq", 1)
-        return [_doc_to_message(doc) for doc in cursor]
+        return [_doc_to_message(doc) async for doc in cursor]
 
-    def _next_seq(self, session_id: str) -> int:
-        last = self._messages.find_one(
+    async def _next_seq(self, session_id: str) -> int:
+        last = await self._messages.find_one(
             {"session_id": session_id}, sort=[("seq", -1)]
         )
         if not last:
             return 0
         return int(last.get("seq", -1)) + 1
 
-    def append_messages(
+    async def append_messages(
         self, session_id: str, messages: Sequence[Message]
     ) -> None:
         if not messages:
             return
-        meta = self._sessions.find_one({"_id": session_id})
+        await self._ensure_indexes()
+        meta = await self._sessions.find_one({"_id": session_id})
         user_id = meta.get("user_id") if meta else None
-        start = self._next_seq(session_id)
+        start = await self._next_seq(session_id)
         docs = [
             _message_to_doc(session_id, start + i, msg, user_id)
             for i, msg in enumerate(messages)
         ]
-        self._messages.insert_many(docs)
-        self._sessions.update_one(
+        await self._messages.insert_many(docs)
+        await self._sessions.update_one(
             {"_id": session_id}, {"$set": {"updated_at": _utc_now()}}
         )
 
-    def replace_messages(
+    async def replace_messages(
         self, session_id: str, messages: Sequence[Message]
     ) -> None:
-        meta = self._sessions.find_one({"_id": session_id})
+        await self._ensure_indexes()
+        meta = await self._sessions.find_one({"_id": session_id})
         user_id = meta.get("user_id") if meta else None
-        self._messages.delete_many({"session_id": session_id})
+        await self._messages.delete_many({"session_id": session_id})
         if messages:
             docs = [
                 _message_to_doc(session_id, i, msg, user_id)
                 for i, msg in enumerate(messages)
             ]
-            self._messages.insert_many(docs)
-        self._sessions.update_one(
+            await self._messages.insert_many(docs)
+        await self._sessions.update_one(
             {"_id": session_id}, {"$set": {"updated_at": _utc_now()}}
         )
 
-    def delete_session(
+    async def delete_session(
         self, session_id: str, *, user_id: str | None = None
     ) -> bool:
-        session = self.get_session(session_id, user_id=user_id)
+        session = await self.get_session(session_id, user_id=user_id)
         if not session:
             return False
-        self._messages.delete_many({"session_id": session_id})
-        result = self._sessions.delete_one({"_id": session_id})
+        await self._messages.delete_many({"session_id": session_id})
+        result = await self._sessions.delete_one({"_id": session_id})
         return result.deleted_count > 0

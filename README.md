@@ -1,5 +1,7 @@
 # PI SDK
 
+> **v0.3.0+ is async-only.** Use `await agent.run(...)` inside `async def` handlers or wrap scripts with `asyncio.run(main())`. See [CHANGELOG.md](CHANGELOG.md) for migration from 0.2.x.
+
 Headless Python coding-agent SDK. Embed an agent in a backend, cloud worker, CI job, or automation — **no CLI, no Rich UI**.
 
 Built from the same core ideas as the **[PI harness](https://github.com/Abhishekkkk-15/pi)** (the local CLI coding agent): tools, providers, sessions, compaction, skills, and permissions — packaged for programmatic use.
@@ -8,7 +10,7 @@ Built from the same core ideas as the **[PI harness](https://github.com/Abhishek
 |---|---|
 | Package | `pi-sdk` (`import pi_sdk`) |
 | Python | 3.11+ |
-| Entry | `Agent.create` → `run` / `stream` / `resume` |
+| Entry | `Agent.create` → `await run` / `async for stream` / `await resume` |
 | Related | [PI harness (CLI)](https://github.com/Abhishekkkk-15/pi) |
 
 ---
@@ -23,31 +25,35 @@ uv pip install -e .
 pip install -e ".[mongodb]"
 ```
 
-Requirements (pulled in automatically): `openai`, `python-dotenv`, `tokenizers`, `tavily-python`, `google-genai`.
+Requirements (pulled in automatically): `openai`, `python-dotenv`, `tokenizers`, `tavily-python`, `google-genai`, `aiofiles`, `httpx`.
 
 ---
 
 ## Quick start
 
 ```python
+import asyncio
 from pi_sdk import Agent
 
-agent = Agent.create(
-    api_key="sk-...",                 # or LLM_KEY / OPENAI_API_KEY
-    provider="mistral",               # mistral | openai | groq | vertex | custom
-    model="mistral-large-latest",
-    cwd=".",                          # workspace tools read/write
-    autonomous=True,                  # allow tools without prompts (servers)
-)
+async def main():
+    agent = Agent.create(
+        api_key="sk-...",                 # or LLM_KEY / OPENAI_API_KEY
+        provider="mistral",               # mistral | openai | groq | vertex | custom
+        model="mistral-large-latest",
+        cwd=".",                          # workspace tools read/write
+        autonomous=True,                  # allow tools without prompts (servers)
+    )
 
-result = agent.run("List Python files and summarize this repo")
-print(result.status)       # "ok" | "error"
-print(result.text)         # final assistant reply
-print(result.session_id)   # give this back to your user/client
-print(result.usage.total_tokens)
+    result = await agent.run("List Python files and summarize this repo")
+    print(result.status)       # "ok" | "error"
+    print(result.text)         # final assistant reply
+    print(result.session_id)   # give this back to your user/client
+    print(result.usage.total_tokens)
+
+asyncio.run(main())
 ```
 
-`agent.send(...)` is an alias for `agent.run(...)`.
+`await agent.send(...)` is an alias for `await agent.run(...)`.
 
 ---
 
@@ -58,7 +64,7 @@ Every successful run creates (or continues) a session. **Send `session_id` to th
 ### First message (new chat)
 
 ```python
-result = agent.run(user_prompt)
+result = await agent.run(user_prompt)
 # HTTP/JSON response to the user:
 payload = {
     "session_id": result.session_id,
@@ -79,8 +85,8 @@ Client sends `session_id` + next prompt:
 
 ```python
 agent = Agent.create(api_key="...", cwd=workspace, autonomous=True)
-agent.resume(session_id)              # load history from disk
-result = agent.run(next_prompt)
+await agent.resume(session_id)              # load history from disk
+result = await agent.run(next_prompt)
 # return result.session_id again (same id)
 ```
 
@@ -89,8 +95,8 @@ result = agent.run(next_prompt)
 ```python
 agent.session_id                      # current id or None
 agent.messages                        # list[Message]
-agent.list_sessions()                 # all sessions in data_dir
-agent.new_session("title")            # force a fresh session
+await agent.list_sessions()                 # all sessions in data_dir
+await agent.new_session("title")            # force a fresh session
 agent.reset_conversation()            # clear in-memory history
 ```
 
@@ -109,7 +115,7 @@ agent.reset_conversation()            # clear in-memory history
 **MongoDB (opt-in)** — session metadata + chat messages only (not workspace files):
 
 ```bash
-pip install "pi-sdk[mongodb]"
+pip install "pi-sdk[mongodb]"   # installs motor
 ```
 
 ```python
@@ -121,10 +127,10 @@ agent = Agent.create(
     user_id="user_42",   # optional tenant scope for list/resume
     cwd="/workspace/proj",
 )
-result = agent.run("...")
+result = await agent.run("...")
 # later:
 agent2 = Agent.create(..., storage="mongodb", mongodb_uri="...", user_id="user_42")
-agent2.resume(result.session_id)
+await agent2.resume(result.session_id)
 ```
 
 Collections: `sessions` (`_id` = session id) and `messages` (`session_id` + `seq`).  
@@ -189,7 +195,7 @@ class RunResult:
 ```
 
 ```python
-result = agent.run(prompt, collect_events=True)
+result = await agent.run(prompt, collect_events=True)
 for e in result.events:
     print(e.type, e.data)
 ```
@@ -214,7 +220,7 @@ def on_event(event):
         push_sse({"done": True, "session_id": event.data.get("session_id")})
 
 agent = Agent.create(api_key="...", on_event=on_event, autonomous=True)
-agent.run("Refactor utils.py")
+await agent.run("Refactor utils.py")
 ```
 
 You can also set the handler later: `agent.on_event(callback)`.
@@ -222,7 +228,7 @@ You can also set the handler later: `agent.on_event(callback)`.
 ### Iterator API
 
 ```python
-for event in agent.stream("Explain agent.py"):
+async for event in agent.stream("Explain agent.py"):
     print(event.type.value, event.data)
 ```
 
@@ -417,7 +423,7 @@ Layouts: `skills/deploy/SKILL.md` or `skills/lint.md`.
 Long sessions are summarized so the context window does not explode.
 
 - Controlled by `compaction_enabled`, `compact_at_tokens`, `keep_recent_tokens`
-- Manual: `agent.run_compaction(force=True)`
+- Manual: `await agent.run_compaction(force=True)`
 
 ---
 
@@ -426,7 +432,7 @@ Long sessions are summarized so the context window does not explode.
 ```python
 from pi_sdk import Agent, EventType
 
-def handle_chat(user_id: str, prompt: str, session_id: str | None, workspace: str):
+async def handle_chat(user_id: str, prompt: str, session_id: str | None, workspace: str):
     agent = Agent.create(
         api_key=...,
         cwd=workspace,          # e.g. cloned repo on a VM
@@ -435,8 +441,8 @@ def handle_chat(user_id: str, prompt: str, session_id: str | None, workspace: st
         on_event=lambda e: bus.publish(user_id, e),  # WebSocket/SSE
     )
     if session_id:
-        agent.resume(session_id)
-    result = agent.run(prompt)
+        await agent.resume(session_id)
+    result = await agent.run(prompt)
     return {
         "session_id": result.session_id,
         "text": result.text,

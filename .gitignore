@@ -8,3 +8,4 @@ build/
 .pytest_cache/
 .pi-sdk/
 .env
+docs/ASYNC_MIGRATION_TODO.md

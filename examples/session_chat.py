@@ -14,6 +14,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -40,10 +41,10 @@ def make_agent() -> Agent:
     )
 
 
-def turn(agent: Agent, prompt: str, label: str) -> str:
+async def turn(agent: Agent, prompt: str, label: str) -> str:
     print(f"\n=== {label} ===")
     print(f"user: {prompt}")
-    result = agent.run(prompt)
+    result = await agent.run(prompt)
     if result.status != "ok":
         print(f"error: {result.error}", file=sys.stderr)
         raise SystemExit(1)
@@ -53,29 +54,25 @@ def turn(agent: Agent, prompt: str, label: str) -> str:
     return result.session_id
 
 
-def main() -> int:
-    # --- Turn 1: new conversation (give session_id to the user) ---
+async def main() -> int:
     agent = make_agent()
-    session_id = turn(
+    session_id = await turn(
         agent,
         "Remember that my favorite color is teal. Reply in one sentence.",
         "turn 1 (new session)",
     )
 
-    # Simulate: client disconnects; later sends session_id + next message
     print("\n... client stores session_id and comes back later ...\n")
 
-    # --- Turn 2: resume with the same session_id ---
     agent2 = make_agent()
-    agent2.resume(session_id)
-    turn(
+    await agent2.resume(session_id)
+    await turn(
         agent2,
         "What is my favorite color? One word only.",
         "turn 2 (resumed)",
     )
 
-    # --- Turn 3: same agent instance, continue ---
-    turn(
+    await turn(
         agent2,
         "Thanks. List the tools you have available in one short line.",
         "turn 3 (same agent)",
@@ -86,4 +83,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

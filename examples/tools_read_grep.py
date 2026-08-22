@@ -11,6 +11,7 @@ Run (from sdk/):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ PROVIDER = "mistral"
 MODEL = "mistral-small-latest"
 
 
-def main() -> int:
+async def main() -> int:
     api_key = os.getenv("LLM_KEY") or os.getenv("MISTRAL_API_KEY")
     if not api_key:
         print("Set LLM_KEY or MISTRAL_API_KEY", file=sys.stderr)
@@ -53,7 +54,7 @@ def main() -> int:
         f"3) Reply with a short summary of what you found (max 8 lines)."
     )
     print(f"model={MODEL}\n")
-    result = agent.run(prompt)
+    result = await agent.run(prompt)
     print("\n\n---")
     if result.status != "ok":
         print(result.error, file=sys.stderr)
@@ -63,4 +64,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

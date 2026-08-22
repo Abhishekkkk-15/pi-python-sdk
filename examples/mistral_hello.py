@@ -12,15 +12,15 @@ Run (from sdk/ after pip install -e .):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
 
 from pi_sdk import Agent
 
-# Explicit Mistral defaults for this example
 PROVIDER = "mistral"
-MODEL = "mistral-small-latest"  # cheap/fast; use mistral-large-latest for harder tasks
+MODEL = "mistral-small-latest"
 BASE_URL = "https://api.mistral.ai/v1"
 
 
@@ -32,7 +32,7 @@ def get_api_key() -> str | None:
     )
 
 
-def main() -> int:
+async def main() -> int:
     api_key = get_api_key()
     if not api_key:
         print(
@@ -44,7 +44,6 @@ def main() -> int:
         )
         return 1
 
-    # Workspace = this repo's sdk folder parent (or cwd)
     workspace = str(Path.cwd())
 
     agent = Agent.create(
@@ -64,7 +63,7 @@ def main() -> int:
     print(f"provider={PROVIDER} model={MODEL}")
     print(f"prompt={prompt!r}\n")
 
-    result = agent.run(prompt)
+    result = await agent.run(prompt)
 
     print("---")
     print(f"status:     {result.status}")
@@ -76,4 +75,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

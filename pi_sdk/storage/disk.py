@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Sequence
 
+import aiofiles
+
 from pi_sdk.models import Message, Role, Session
 from pi_sdk.paths import get_data_root, get_workspace
 from pi_sdk.storage.base import SessionStore
@@ -24,13 +26,13 @@ def generate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
-def write_json(path: Path | str, data: Any) -> None:
+async def write_json(path: Path | str, data: Any) -> None:
     file_path = Path(path)
     payload = asdict(data) if is_dataclass(data) else data  # type: ignore
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as file:
-            json.dump(payload, file, indent=4, default=str)
+        async with aiofiles.open(file_path, "w", encoding="utf-8") as file:
+            await file.write(json.dumps(payload, indent=4, default=str))
     except TypeError as e:
         raise TypeError(
             f"Failed to serialize data for {file_path.name}: {e}"
@@ -39,11 +41,12 @@ def write_json(path: Path | str, data: Any) -> None:
         raise RuntimeError(f"Could not write to {file_path}: {e}") from e
 
 
-def read_json(path: Path | str) -> Any:
+async def read_json(path: Path | str) -> Any:
     file_path = Path(path)
     try:
-        with open(file_path, "r", encoding="utf-8") as file:
-            return json.load(file)
+        async with aiofiles.open(file_path, "r", encoding="utf-8") as file:
+            content = await file.read()
+            return json.loads(content)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
 
@@ -58,8 +61,8 @@ def _default_serializer(obj: Any) -> Any:
     return str(obj)
 
 
-def write_jsonl(path: Path | str, data_list: Sequence[Any], mode: str = "w") -> None:
-    with open(path, mode, encoding="utf-8") as file:
+async def write_jsonl(path: Path | str, data_list: Sequence[Any], mode: str = "w") -> None:
+    async with aiofiles.open(path, mode, encoding="utf-8") as file:
         for item in data_list:
             if hasattr(item, "to_dict"):
                 payload = item.to_dict()
@@ -67,16 +70,16 @@ def write_jsonl(path: Path | str, data_list: Sequence[Any], mode: str = "w") -> 
                 payload = asdict(item)
             else:
                 payload = item
-            file.write(json.dumps(payload, default=_default_serializer) + "\n")
+            await file.write(json.dumps(payload, default=_default_serializer) + "\n")
 
 
-def read_jsonl(path: Path | str) -> list[Message]:
+async def read_jsonl(path: Path | str) -> list[Message]:
     messages: list[Message] = []
     file_path = Path(path)
     if not file_path.exists():
         return messages
-    with open(file_path, "r", encoding="utf-8") as file:
-        for line in file:
+    async with aiofiles.open(file_path, "r", encoding="utf-8") as file:
+        async for line in file:
             line = line.strip()
             if not line:
                 continue
@@ -140,7 +143,7 @@ class DiskSessionStore(SessionStore):
     def _metadata_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "metadata.json"
 
-    def create_session(
+    async def create_session(
         self,
         *,
         title: str,
@@ -169,16 +172,16 @@ class DiskSessionStore(SessionStore):
             created_at=now,
             updated_at=now,
         )
-        write_json(self._metadata_path(sid), session)
+        await write_json(self._metadata_path(sid), session)
         return session
 
-    def get_session(
+    async def get_session(
         self, session_id: str, *, user_id: str | None = None
     ) -> Session | None:
         meta_path = self._metadata_path(session_id)
         if not meta_path.exists():
             return None
-        data = read_json(meta_path)
+        data = await read_json(meta_path)
         if not isinstance(data, dict):
             return None
         session = session_from_metadata(data, self._session_dir(session_id))
@@ -186,7 +189,7 @@ class DiskSessionStore(SessionStore):
             return None
         return session
 
-    def list_sessions(self, *, user_id: str | None = None) -> list[Session]:
+    async def list_sessions(self, *, user_id: str | None = None) -> list[Session]:
         memory_path = self.root
         if not memory_path.exists():
             return []
@@ -198,7 +201,7 @@ class DiskSessionStore(SessionStore):
             if not metadata_file.exists():
                 continue
             try:
-                data = read_json(metadata_file)
+                data = await read_json(metadata_file)
                 if not isinstance(data, dict):
                     continue
                 session = session_from_metadata(data, folder)
@@ -209,16 +212,16 @@ class DiskSessionStore(SessionStore):
                 continue
         return sessions
 
-    def save_session(self, session: Session) -> None:
+    async def save_session(self, session: Session) -> None:
         session.updated_at = _utc_now()
         if session.history_path is None:
             session.history_path = self._history_path(session.id)
-        write_json(self._metadata_path(session.id), session)
+        await write_json(self._metadata_path(session.id), session)
 
-    def load_messages(self, session_id: str) -> list[Message]:
-        return read_jsonl(self._history_path(session_id))
+    async def load_messages(self, session_id: str) -> list[Message]:
+        return await read_jsonl(self._history_path(session_id))
 
-    def append_messages(
+    async def append_messages(
         self, session_id: str, messages: Sequence[Message]
     ) -> None:
         if not messages:
@@ -227,19 +230,19 @@ class DiskSessionStore(SessionStore):
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.touch()
-        write_jsonl(path, messages, mode="a")
+        await write_jsonl(path, messages, mode="a")
 
-    def replace_messages(
+    async def replace_messages(
         self, session_id: str, messages: Sequence[Message]
     ) -> None:
         path = self._history_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_jsonl(path, messages, mode="w")
+        await write_jsonl(path, messages, mode="w")
 
-    def delete_session(
+    async def delete_session(
         self, session_id: str, *, user_id: str | None = None
     ) -> bool:
-        session = self.get_session(session_id, user_id=user_id)
+        session = await self.get_session(session_id, user_id=user_id)
         if not session:
             return False
         folder = self._session_dir(session_id)

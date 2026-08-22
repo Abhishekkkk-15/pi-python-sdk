@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
 from pi_sdk import Agent, EventType
 
 
-def main() -> int:
+async def main() -> int:
     api_key = os.getenv("LLM_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         print("Set LLM_KEY or OPENAI_API_KEY", file=sys.stderr)
@@ -35,7 +36,7 @@ def main() -> int:
         on_event=on_event,
     )
     prompt = " ".join(sys.argv[1:]) or "What is in README.md? Use the read tool."
-    result = agent.run(prompt)
+    result = await agent.run(prompt)
     if result.status != "ok":
         print(result.error or "failed", file=sys.stderr)
         return 1
@@ -43,4 +44,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

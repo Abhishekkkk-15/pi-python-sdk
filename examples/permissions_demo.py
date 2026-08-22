@@ -10,6 +10,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -18,7 +19,6 @@ from pi_sdk import Agent, EventType
 PROVIDER = "mistral"
 MODEL = "mistral-small-latest"
 
-# Tools we allow without human review
 ALLOW = {"read", "grep"}
 
 
@@ -28,7 +28,7 @@ def approve(tool: str, target: str, details: str) -> bool:
     return allowed
 
 
-def main() -> int:
+async def main() -> int:
     api_key = os.getenv("LLM_KEY") or os.getenv("MISTRAL_API_KEY")
     if not api_key:
         print("Set LLM_KEY or MISTRAL_API_KEY", file=sys.stderr)
@@ -46,19 +46,18 @@ def main() -> int:
         provider=PROVIDER,
         model=MODEL,
         cwd=os.getcwd(),
-        autonomous=False,  # require permission_callback
+        autonomous=False,
         permission_callback=approve,
         on_event=on_event,
     )
 
-    # This should succeed via read/grep only
     prompt = (
         " ".join(sys.argv[1:]).strip()
         or "Use the read tool on README.md and summarize it in 3 bullets. "
         "Do not use bash or write."
     )
     print(f"prompt: {prompt}\n")
-    result = agent.run(prompt)
+    result = await agent.run(prompt)
     print("\n---")
     print(result.text or result.error)
     print(f"status={result.status} session_id={result.session_id}")
@@ -66,4 +65,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

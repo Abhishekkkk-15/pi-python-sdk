@@ -85,7 +85,7 @@ class LLMProvider(ABC):
     name: str
 
     @abstractmethod
-    def complete(
+    async def complete(
         self,
         messages: list[dict[str, Any]],
         *,

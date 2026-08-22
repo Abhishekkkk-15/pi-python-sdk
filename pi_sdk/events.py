@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 
 class EventType(str, Enum):
@@ -35,7 +36,7 @@ class AgentEvent:
         return str(self.data.get("text") or self.data.get("content") or "")
 
 
-EventCallback = Callable[[AgentEvent], None]
+EventCallback = Callable[[AgentEvent], None | Awaitable[None]]
 
 
 class EventEmitter:
@@ -46,12 +47,14 @@ class EventEmitter:
         self._buffer: list[AgentEvent] = []
         self.collect = False
 
-    def emit(self, event_type: EventType, **data: Any) -> AgentEvent:
+    async def emit(self, event_type: EventType, **data: Any) -> AgentEvent:
         event = AgentEvent(type=event_type, data=data)
         if self.collect:
             self._buffer.append(event)
         if self._on_event is not None:
-            self._on_event(event)
+            result = self._on_event(event)
+            if inspect.isawaitable(result):
+                await result
         return event
 
     def drain(self) -> list[AgentEvent]:

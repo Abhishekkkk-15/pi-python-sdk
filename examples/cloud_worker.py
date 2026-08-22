@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from pi_sdk import Agent, AgentEvent, EventType, RunResult
 
 
-def run_cloud_task(
+async def run_cloud_task(
     *,
     prompt: str,
     workspace: str,
     api_key: str | None = None,
     provider: str = "mistral",
     model: str | None = None,
-    on_event: Callable[[AgentEvent], None] | None = None,
+    on_event: Callable[[AgentEvent], None | Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """
     Run an agent against a checked-out workspace (e.g. cloned repo on a VM).
@@ -30,7 +31,7 @@ def run_cloud_task(
         autonomous=True,
         on_event=on_event,
     )
-    result: RunResult = agent.run(prompt, collect_events=True)
+    result: RunResult = await agent.run(prompt, collect_events=True)
     return {
         "status": result.status,
         "text": result.text,
@@ -57,4 +58,4 @@ if __name__ == "__main__":
 
     ws = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     prompt = sys.argv[2] if len(sys.argv) > 2 else "Summarize this repo briefly."
-    print(json.dumps(run_cloud_task(prompt=prompt, workspace=ws), indent=2))
+    print(json.dumps(asyncio.run(run_cloud_task(prompt=prompt, workspace=ws)), indent=2))

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import aiofiles
+
 from pi_sdk.paths import get_data_root, get_workspace
 
 
@@ -15,12 +17,6 @@ class Skills:
 
     @classmethod
     def search_dirs(cls) -> List[Path]:
-        """
-        Skill locations, highest precedence first.
-
-        Skills come from the configured workspace (Agent cwd), then global
-        skills under the SDK data root (~/.pi-sdk/skills by default).
-        """
         workspace = get_workspace()
         candidates = [
             workspace / ".pi-sdk" / "skills",
@@ -39,7 +35,7 @@ class Skills:
         return dirs
 
     @classmethod
-    def refresh(cls) -> None:
+    async def refresh(cls) -> None:
         """Reload all skills into memory, supporting skills/<skill_name>/SKILL.md structure."""
         cls._cache.clear()
         cls._paths.clear()
@@ -49,14 +45,13 @@ class Skills:
             if not base_dir.is_dir():
                 continue
 
-            # 1. Folder structure: skills/<skill_name>/SKILL.md
             for folder in sorted(base_dir.iterdir()):
                 if not folder.is_dir() or folder.name.startswith("."):
                     continue
 
                 skill_name = folder.name
                 if skill_name in cls._cache:
-                    continue  # earlier dir wins
+                    continue
 
                 skill_file = folder / cls.FILENAME
                 if not skill_file.exists():
@@ -68,12 +63,12 @@ class Skills:
 
                 if skill_file.is_file():
                     try:
-                        cls._cache[skill_name] = skill_file.read_text(encoding="utf-8")
+                        async with aiofiles.open(skill_file, "r", encoding="utf-8") as f:
+                            cls._cache[skill_name] = await f.read()
                     except OSError:
                         continue
                     cls._paths[skill_name] = skill_file
 
-            # 2. Direct file structure: skills/<skill_name>.md
             for file in sorted(base_dir.glob("*.md")):
                 if not file.is_file() or file.stem.upper() == "SKILL":
                     continue
@@ -81,43 +76,35 @@ class Skills:
                 if skill_name in cls._cache:
                     continue
                 try:
-                    cls._cache[skill_name] = file.read_text(encoding="utf-8")
+                    async with aiofiles.open(file, "r", encoding="utf-8") as f:
+                        cls._cache[skill_name] = await f.read()
                 except OSError:
                     continue
                 cls._paths[skill_name] = file
 
     @classmethod
-    def _ensure_loaded(cls) -> None:
-        """Refresh on first use, or when the working directory changed."""
+    async def _ensure_loaded(cls) -> None:
         if not cls._cache or cls._scanned_cwd != get_workspace():
-            cls.refresh()
+            await cls.refresh()
 
     @classmethod
-    def names(cls) -> List[str]:
-        """Return all available skill names (folder names or file stems)."""
-        cls._ensure_loaded()
-
+    async def names(cls) -> List[str]:
+        await cls._ensure_loaded()
         return sorted(cls._cache.keys())
 
     @classmethod
-    def exists(cls, skill_name: str) -> bool:
-        """Check whether a skill exists."""
-        cls._ensure_loaded()
-
+    async def exists(cls, skill_name: str) -> bool:
+        await cls._ensure_loaded()
         return skill_name in cls._cache
 
     @classmethod
-    def load(cls, skill_name: str) -> Optional[str]:
-        """Load a skill's content."""
-        cls._ensure_loaded()
-
+    async def load(cls, skill_name: str) -> Optional[str]:
+        await cls._ensure_loaded()
         return cls._cache.get(skill_name)
 
     @classmethod
-    def load_many(cls, skill_names: List[str]) -> Dict[str, str]:
-        """Load multiple skills at once."""
-        cls._ensure_loaded()
-
+    async def load_many(cls, skill_names: List[str]) -> Dict[str, str]:
+        await cls._ensure_loaded()
         return {
             name: content
             for name, content in cls._cache.items()
@@ -125,17 +112,13 @@ class Skills:
         }
 
     @classmethod
-    def search(
+    async def search(
         cls,
         query: str,
         *,
         search_content: bool = True,
     ) -> List[str]:
-        """
-        Search skills by name and optionally content.
-        Returns matching skill names.
-        """
-        cls._ensure_loaded()
+        await cls._ensure_loaded()
 
         query = query.lower().strip()
         matches = []
@@ -151,8 +134,7 @@ class Skills:
         return sorted(matches)
 
     @classmethod
-    def get_metadata(cls, skill_name: str) -> Optional[dict]:
-        """Return basic skill metadata."""
+    async def get_metadata(cls, skill_name: str) -> Optional[dict]:
         path = cls.path(skill_name)
         if not path or not path.exists():
             return None
@@ -166,7 +148,4 @@ class Skills:
 
     @classmethod
     def path(cls, skill_name: str) -> Optional[Path]:
-        """Return the file path for a skill."""
-        cls._ensure_loaded()
-
         return cls._paths.get(skill_name)

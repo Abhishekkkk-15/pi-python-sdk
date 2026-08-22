@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Optional
 
 from pi_sdk import prompts
 from pi_sdk.compaction import Compaction
@@ -133,33 +134,42 @@ class _EventStreamHandler(StreamHandler):
         self.emitter = emitter
         self._thinking: list[str] = []
         self._content: list[str] = []
+        self._pending: list[tuple[EventType, dict[str, Any]]] = []
+
+    def _buffer(self, event_type: EventType, **data: Any) -> None:
+        self._pending.append((event_type, data))
+
+    async def flush(self) -> None:
+        for event_type, data in self._pending:
+            await self.emitter.emit(event_type, **data)
+        self._pending.clear()
 
     def thinking_start(self) -> None:
         self._thinking.clear()
 
     def thinking_chunk(self, text: str) -> None:
         self._thinking.append(text)
-        self.emitter.emit(EventType.THINKING_DELTA, text=text)
+        self._buffer(EventType.THINKING_DELTA, text=text)
 
     def thinking_end(self) -> None:
         full = "".join(self._thinking)
         if full:
-            self.emitter.emit(EventType.THINKING, text=full)
+            self._buffer(EventType.THINKING, text=full)
 
     def content_start(self) -> None:
         self._content.clear()
 
     def content_chunk(self, text: str) -> None:
         self._content.append(text)
-        self.emitter.emit(EventType.TEXT_DELTA, text=text)
+        self._buffer(EventType.TEXT_DELTA, text=text)
 
     def content_end(self) -> None:
         full = "".join(self._content)
         if full:
-            self.emitter.emit(EventType.TEXT, text=full)
+            self._buffer(EventType.TEXT, text=full)
 
     def tool_args_progress(self, names: str, kb: float) -> None:
-        self.emitter.emit(
+        self._buffer(
             EventType.STATUS,
             message=f"Generating arguments for {names} ({kb:.1f} KB)",
         )
@@ -209,9 +219,6 @@ class Agent:
 
         sys_prompt = self._build_system_prompt(cwd=str(get_workspace()))
         self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
-
-        if self.manual_skill_names:
-            self.apply_active_skills(list(self.manual_skill_names))
 
     # ------------------------------------------------------------------
     # Construction
@@ -307,7 +314,7 @@ class Agent:
     # Custom tools
     # ------------------------------------------------------------------
 
-    def add_tool(
+    async def add_tool(
         self,
         name: str,
         *,
@@ -351,17 +358,17 @@ class Agent:
             replace=replace,
         )
         if update_system_prompt:
-            self._sync_system_prompt_tools()
+            await self._sync_system_prompt_tools()
         return spec
 
-    def remove_tool(self, name: str, *, update_system_prompt: bool = True) -> bool:
+    async def remove_tool(self, name: str, *, update_system_prompt: bool = True) -> bool:
         """Unregister a tool by name. Returns True if it existed."""
         removed = self.tools.remove(name)
         if removed and update_system_prompt:
-            self._sync_system_prompt_tools()
+            await self._sync_system_prompt_tools()
         return removed
 
-    def disable_tools(
+    async def disable_tools(
         self,
         *names: str,
         update_system_prompt: bool = True,
@@ -378,7 +385,7 @@ class Agent:
             if self.tools.remove(str(name).strip()):
                 removed.append(str(name).strip())
         if removed and update_system_prompt:
-            self._sync_system_prompt_tools()
+            await self._sync_system_prompt_tools()
         return removed
 
     def list_tools(self) -> list[str]:
@@ -403,7 +410,7 @@ class Agent:
             prompt = f"{prompt}\n\n{self.config.system_prompt_extra}"
         return prompt
 
-    def _sync_system_prompt_tools(self) -> None:
+    async def _sync_system_prompt_tools(self) -> None:
         workspace = (
             str(self.memory.session.workspace)
             if self.memory.session
@@ -414,29 +421,34 @@ class Agent:
         if self.manual_skill_names:
             from pi_sdk.skills import Skills
 
-            active = Skills.load_many(
-                [n for n in self.manual_skill_names if Skills.exists(n)]
-            ) or None
+            filtered = [
+                n
+                for n in self.manual_skill_names
+                if await Skills.exists(n)
+            ]
+            active = await Skills.load_many(filtered) if filtered else None
+            if not active:
+                active = None
         sys_prompt = self._build_system_prompt(cwd=workspace, active_skills=active)
         if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
             self.memory.messages[0].content = sys_prompt
             if self.memory.session:
-                self.memory.replace_messages()
+                await self.memory.replace_messages()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def send(self, prompt: str, *, collect_events: bool = False) -> RunResult:
+    async def send(self, prompt: str, *, collect_events: bool = False) -> RunResult:
         """Alias for run()."""
-        return self.run(prompt, collect_events=collect_events)
+        return await self.run(prompt, collect_events=collect_events)
 
-    def run(self, prompt: str, *, collect_events: bool = False) -> RunResult:
+    async def run(self, prompt: str, *, collect_events: bool = False) -> RunResult:
         """Run one user turn to completion (tool loop included)."""
         self._emitter.collect = collect_events
         self._emitter.drain()
         try:
-            choice = self._chat(prompt)
+            choice = await self._chat(prompt)
             session = self.memory.session
             usage = UsageSummary()
             if session:
@@ -457,7 +469,7 @@ class Agent:
                     error="Run failed or returned no assistant message",
                     messages=list(self.memory.messages),
                 )
-                self._emitter.emit(
+                await self._emitter.emit(
                     EventType.RUN_FAILED,
                     error=result.error,
                     session_id=result.session_id,
@@ -475,14 +487,14 @@ class Agent:
                 events=self._emitter.drain() if collect_events else [],
                 messages=list(self.memory.messages),
             )
-            self._emitter.emit(
+            await self._emitter.emit(
                 EventType.RUN_COMPLETED,
                 text=result.text,
                 session_id=result.session_id,
             )
             return result
         except Exception as exc:
-            self._emitter.emit(EventType.RUN_FAILED, error=str(exc))
+            await self._emitter.emit(EventType.RUN_FAILED, error=str(exc))
             session = self.memory.session
             return RunResult(
                 status="error",
@@ -494,7 +506,7 @@ class Agent:
         finally:
             self._emitter.collect = False
 
-    def stream(self, prompt: str) -> Iterator[AgentEvent]:
+    async def stream(self, prompt: str) -> AsyncIterator[AgentEvent]:
         """
         Yield events while running a turn.
 
@@ -504,7 +516,7 @@ class Agent:
 
         For live streaming, prefer:
             Agent.create(..., on_event=handler)
-            agent.run(prompt)
+            await agent.run(prompt)
         or pass on_event and iterate collected events with collect_events=True.
         """
         collected: list[AgentEvent] = []
@@ -519,28 +531,29 @@ class Agent:
         self._user_on_event = prev_cb
         self._emitter._on_event = _capture
         try:
-            self.run(prompt, collect_events=False)
-            yield from collected
+            await self.run(prompt, collect_events=False)
+            for event in collected:
+                yield event
         finally:
             self._emitter._on_event = prev_cb
             self._user_on_event = None
 
-    def resume(self, session_id: str) -> "Agent":
+    async def resume(self, session_id: str) -> "Agent":
         """Load an existing session into this agent and return self."""
-        session = self.memory.get_session_by_id(session_id)
+        session = await self.memory.get_session_by_id(session_id)
         if not session:
             raise AgentError(f"Session not found: {session_id}")
         set_workspace(session.workspace)
         self.memory.session = session
         self.current_session = session
         sys_prompt = self._build_system_prompt(cwd=str(session.workspace))
-        self.memory.load_session_chat(session, system_prompt=sys_prompt)
+        await self.memory.load_session_chat(session, system_prompt=sys_prompt)
         return self
 
-    def new_session(self, title: str = "session") -> Session:
+    async def new_session(self, title: str = "session") -> Session:
         """Start a fresh session (keeps config / provider)."""
         self.reset_conversation()
-        session = self.memory.init_session(
+        session = await self.memory.init_session(
             title,
             initial_messages=self.memory.messages,
             workspace=get_workspace(),
@@ -557,11 +570,9 @@ class Agent:
         self._pending_cached_tokens = 0
         sys_prompt = self._build_system_prompt(cwd=str(get_workspace()))
         self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
-        if self.manual_skill_names:
-            self.apply_active_skills(list(self.manual_skill_names))
 
-    def list_sessions(self) -> list[Session]:
-        return self.memory.load_old_sessions()
+    async def list_sessions(self) -> list[Session]:
+        return await self.memory.load_old_sessions()
 
     @property
     def session_id(self) -> str | None:
@@ -575,13 +586,13 @@ class Agent:
     # Skills
     # ------------------------------------------------------------------
 
-    def apply_active_skills(self, skill_names: list[str]) -> None:
+    async def apply_active_skills(self, skill_names: list[str]) -> None:
         workspace = (
             self.memory.session.workspace
             if self.memory.session
             else get_workspace()
         )
-        active = Skills.load_many(skill_names) if skill_names else None
+        active = await Skills.load_many(skill_names) if skill_names else None
         sys_prompt = self._build_system_prompt(
             cwd=str(workspace),
             active_skills=active or None,
@@ -589,10 +600,10 @@ class Agent:
         if self.memory.messages and self.memory.messages[0].role == Role.SYSTEM:
             self.memory.messages[0].content = sys_prompt
             if self.memory.session:
-                self.memory.replace_messages()
+                await self.memory.replace_messages()
 
-    def select_relevant_skills(self, user_query: str) -> list[str]:
-        available = Skills.names()
+    async def select_relevant_skills(self, user_query: str) -> list[str]:
+        available = await Skills.names()
         if not available:
             return []
         prompt_str = (
@@ -604,12 +615,12 @@ class Agent:
             f"If none, return []."
         )
         try:
-            response = self._create_completion(
+            response = await self._create_completion(
                 messages=[{"role": "user", "content": prompt_str}],
                 use_tools=False,
                 stream=False,
             )
-            self._record_usage(response)
+            await self._record_usage(response)
             content = (response.choices[0].message.content or "").strip()
             match = re.search(r"\[.*?\]", content, re.DOTALL)
             if match:
@@ -656,18 +667,18 @@ class Agent:
             return int(k_match.group(1)) * 1_000
         return 128000
 
-    def _append_message(self, msg: Message) -> None:
-        self.memory.append_message(msg)
+    async def _append_message(self, msg: Message) -> None:
+        await self.memory.append_message(msg)
 
-    def _rewrite_session_history(self) -> None:
+    async def _rewrite_session_history(self) -> None:
         if not self.memory.session:
             return
-        self.memory.replace_messages()
+        await self.memory.replace_messages()
 
-    def _persist_session_usage(self) -> None:
-        self.memory.save_session()
+    async def _persist_session_usage(self) -> None:
+        await self.memory.save_session()
 
-    def _flush_pending_usage(self) -> None:
+    async def _flush_pending_usage(self) -> None:
         session = self.memory.session
         if not session:
             return
@@ -694,9 +705,9 @@ class Agent:
         self._pending_completion_tokens = 0
         self._pending_total_tokens = 0
         self._pending_cached_tokens = 0
-        self._persist_session_usage()
+        await self._persist_session_usage()
 
-    def _record_usage(self, response: Any) -> None:
+    async def _record_usage(self, response: Any) -> None:
         usage = getattr(response, "usage", None)
         if usage is None:
             return
@@ -734,8 +745,8 @@ class Agent:
             cached,
             self.config.provider,
         )
-        self._persist_session_usage()
-        self._emitter.emit(
+        await self._persist_session_usage()
+        await self._emitter.emit(
             EventType.USAGE,
             prompt_tokens=session.prompt_tokens,
             completion_tokens=session.completion_tokens,
@@ -755,7 +766,7 @@ class Agent:
         working = comp.working_messages(self.memory.messages, self.memory.session)
         return sanitize_api_messages([m.to_dict() for m in working])
 
-    def run_compaction(self, *, force: bool = False) -> str:
+    async def run_compaction(self, *, force: bool = False) -> str:
         session = self.memory.session
         if not session:
             return "No active session."
@@ -768,18 +779,18 @@ class Agent:
         if not planned:
             return "Nothing new to fold."
         segment, new_until, keep_used = planned
-        self._emitter.emit(
+        await self._emitter.emit(
             EventType.COMPACTION,
             message=f"Compacting {len(segment)} message(s)...",
         )
         prompt = comp.build_prompt(session.compaction_summary, segment)
         try:
-            response = self._create_completion(
+            response = await self._create_completion(
                 messages=[{"role": "user", "content": prompt}],
                 use_tools=False,
                 stream=False,
             )
-            self._record_usage(response)
+            await self._record_usage(response)
             summary = (response.choices[0].message.content or "").strip()
         except Exception as e:
             return f"Compaction failed: {e}"
@@ -787,15 +798,15 @@ class Agent:
             return "Summarizer returned empty text."
         session.compaction_summary = summary
         session.compacted_until = new_until
-        self._persist_session_usage()
+        await self._persist_session_usage()
         msg = (
             f"Compacted through message {new_until} "
             f"({len(segment)} folded; keep={keep_used})."
         )
-        self._emitter.emit(EventType.COMPACTION, message=msg)
+        await self._emitter.emit(EventType.COMPACTION, message=msg)
         return msg
 
-    def _create_completion(
+    async def _create_completion(
         self,
         messages: list[dict],
         use_tools: bool = True,
@@ -832,12 +843,12 @@ class Agent:
 
             return EstimatedUsage(prompt_tokens, completion_tokens)
 
-        def _run_once() -> tuple[Any, Optional[BaseException]]:
+        async def _run_once() -> tuple[Any, Optional[BaseException]]:
             try:
                 if not self.llm:
                     return None, AuthenticationError("No LLM client configured.")
                 handler = _EventStreamHandler(self._emitter) if stream else None
-                response = self.llm.complete(
+                response = await self.llm.complete(
                     messages,
                     model=self.model_name,
                     tools=self.tools.schemas() if use_tools else None,
@@ -846,30 +857,32 @@ class Agent:
                     stream_handler=handler,
                     count_usage=_estimate_usage,
                 )
+                if handler is not None:
+                    await handler.flush()
                 return response, None
             except Exception as exc:
                 return None, exc
 
-        response, error = _run_once()
+        response, error = await _run_once()
         if error is None:
             return response
 
         if self.llm and self.llm.is_rate_limit(error) and self.config.rotate_api_key():
             self.llm = self._create_provider()
-            self._emitter.emit(
+            await self._emitter.emit(
                 EventType.STATUS,
                 message="Rotated API key after rate limit; retrying...",
             )
-            response, error = _run_once()
+            response, error = await _run_once()
             if error is None:
                 return response
 
         raise error  # type: ignore[misc]
 
-    def _ensure_session(self, user_query: str) -> Session:
+    async def _ensure_session(self, user_query: str) -> Session:
         if self.memory.session is not None:
             return self.memory.session
-        session = self.memory.init_session(
+        session = await self.memory.init_session(
             user_query[:80] or "session",
             initial_messages=self.memory.messages,
             workspace=get_workspace(),
@@ -879,60 +892,60 @@ class Agent:
             self.memory.messages[0].content = self._build_system_prompt(
                 cwd=str(session.workspace)
             )
-            self.memory.replace_messages()
-        self._flush_pending_usage()
+            await self.memory.replace_messages()
+        await self._flush_pending_usage()
         return session
 
-    def _chat(self, user_query: str) -> Any:
-        session = self._ensure_session(user_query)
-        self._emitter.emit(
+    async def _chat(self, user_query: str) -> Any:
+        session = await self._ensure_session(user_query)
+        await self._emitter.emit(
             EventType.RUN_STARTED,
             prompt=user_query,
             session_id=session.id,
         )
-        self._emitter.emit(EventType.USER_MESSAGE, text=user_query)
+        await self._emitter.emit(EventType.USER_MESSAGE, text=user_query)
 
-        available_skills = Skills.names()
+        available_skills = await Skills.names()
         if available_skills:
             if self.manual_skill_names is not None:
                 selected = [n for n in self.manual_skill_names if n in available_skills]
             else:
-                selected = self.select_relevant_skills(user_query)
-            self.apply_active_skills(selected)
+                selected = await self.select_relevant_skills(user_query)
+            await self.apply_active_skills(selected)
 
-        self._append_message(Message(role=Role.USER, content=user_query))
+        await self._append_message(Message(role=Role.USER, content=user_query))
 
         while True:
             if self.config.compaction_enabled:
-                self.run_compaction(force=False)
+                await self.run_compaction(force=False)
             api_messages = self._build_api_messages()
             try:
-                res = self._create_completion(api_messages, use_tools=True, stream=True)
+                res = await self._create_completion(api_messages, use_tools=True, stream=True)
             except Exception as e:
                 detail = f"{type(e).__name__}: {e}"
-                self._emitter.emit(EventType.ERROR, error=detail)
-                self._append_message(
+                await self._emitter.emit(EventType.ERROR, error=detail)
+                await self._append_message(
                     Message(role=Role.ASSISTANT, content=f"[LLM Error] {detail}")
                 )
                 return None
 
             if not res or not res.choices:
-                self._emitter.emit(EventType.ERROR, error="LLM returned no choices")
+                await self._emitter.emit(EventType.ERROR, error="LLM returned no choices")
                 return None
 
-            self._record_usage(res)
+            await self._record_usage(res)
             llm_res = res.choices[0]
 
             reasoning = getattr(llm_res.message, "reasoning_content", None)
             if reasoning and not getattr(llm_res.message, "already_printed", False):
-                self._emitter.emit(EventType.THINKING, text=reasoning)
+                await self._emitter.emit(EventType.THINKING, text=reasoning)
 
             if (
                 llm_res.message.tool_calls
                 and llm_res.message.content
                 and not getattr(llm_res.message, "already_printed", False)
             ):
-                self._emitter.emit(EventType.TEXT, text=llm_res.message.content)
+                await self._emitter.emit(EventType.TEXT, text=llm_res.message.content)
 
             tool_calls_raw = llm_res.message.tool_calls
             tool_calls_dicts = (
@@ -944,7 +957,7 @@ class Agent:
                 tool_calls=tool_calls_dicts,
                 reasoning_content=reasoning,
             )
-            self._append_message(chat_msg)
+            await self._append_message(chat_msg)
 
             if not llm_res.message.tool_calls:
                 return llm_res
@@ -953,20 +966,20 @@ class Agent:
             for tool in llm_res.message.tool_calls:
                 tool_name = tool.function.name
                 tool_arguments = tool.function.arguments
-                self._emitter.emit(
+                await self._emitter.emit(
                     EventType.TOOL_CALL,
                     name=tool_name,
                     arguments=tool_arguments,
                     id=getattr(tool, "id", None),
                 )
                 try:
-                    fn_output = self.dispatch_tool_call(tool_name, tool_arguments)
+                    fn_output = await self.dispatch_tool_call(tool_name, tool_arguments)
                 except Exception as e:
                     fn_output = f"Error executing tool {tool_name}: {e}"
-                    self._emitter.emit(
+                    await self._emitter.emit(
                         EventType.ERROR, error=fn_output, title="Tool Error"
                     )
-                self._emitter.emit(
+                await self._emitter.emit(
                     EventType.TOOL_RESULT,
                     name=tool_name,
                     content=fn_output,
@@ -981,7 +994,7 @@ class Agent:
                     ):
                         history_dirty = True
 
-                self._append_message(
+                await self._append_message(
                     Message(
                         role=Role.TOOL,
                         name=tool_name,
@@ -993,9 +1006,9 @@ class Agent:
             if age_out_large_payloads(self.memory.messages, keep_recent=16):
                 history_dirty = True
             if history_dirty:
-                self._rewrite_session_history()
+                await self._rewrite_session_history()
 
-    def check_permission(self, tool_name: str, target: str, action_details: str) -> bool:
+    async def check_permission(self, tool_name: str, target: str, action_details: str) -> bool:
         if PermissionManager.check_permission(
             self.memory.session,
             tool_name,
@@ -1006,20 +1019,22 @@ class Agent:
 
         cb = self.config.permission_callback
         if cb is not None:
-            self._emitter.emit(
+            await self._emitter.emit(
                 EventType.PERMISSION_REQUEST,
                 tool=tool_name,
                 target=target,
                 details=action_details,
             )
-            allowed = bool(cb(tool_name, target, action_details))
+            allowed = await PermissionManager.resolve_callback(
+                cb, tool_name, target, action_details
+            )
             if allowed and self.memory.session:
                 # Treat callback approval as allow-once (caller can persist via session)
                 return True
             return allowed
 
         # Headless default without callback: deny (safe for cloud integrations)
-        self._emitter.emit(
+        await self._emitter.emit(
             EventType.PERMISSION_REQUEST,
             tool=tool_name,
             target=target,
@@ -1028,7 +1043,7 @@ class Agent:
         )
         return False
 
-    def grant_permission(
+    async def grant_permission(
         self,
         grant_type: str,
         tool_name: str,
@@ -1037,11 +1052,11 @@ class Agent:
         """Persist a permission grant on the active session."""
         if not self.memory.session:
             return
-        PermissionManager.save_permission_grant(
+        await PermissionManager.save_permission_grant(
             self.memory, self.memory.session, grant_type, tool_name, target
         )
 
-    def dispatch_tool_call(self, tool_name: str, function_arguments: str) -> str:
+    async def dispatch_tool_call(self, tool_name: str, function_arguments: str) -> str:
         try:
             args = json.loads(function_arguments) if function_arguments else {}
         except json.JSONDecodeError:
@@ -1057,11 +1072,11 @@ class Agent:
         if spec.require_permission:
             target = self.tools.permission_target(tool_name, args)
             details = f"Agent wants to run {tool_name}: {target or args}"
-            if not self.check_permission(tool_name, target or tool_name, details):
+            if not await self.check_permission(tool_name, target or tool_name, details):
                 return "User permission denied"
 
         try:
-            return self.tools.dispatch(tool_name, args)
+            return await self.tools.dispatch(tool_name, args)
         except Exception as e:
             return f"Error executing tool {tool_name}: {e}"
 

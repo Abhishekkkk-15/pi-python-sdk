@@ -15,7 +15,7 @@ from pi_sdk.permissions import PermissionDecision
 from pi_sdk.storage import SessionStore, create_store, DiskSessionStore
 from pi_sdk.tool_registry import ToolSpec, BUILTIN_TOOL_NAMES
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 __all__ = [
     "Agent",

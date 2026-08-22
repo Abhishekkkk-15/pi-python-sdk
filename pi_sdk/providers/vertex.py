@@ -12,6 +12,7 @@ A full `https://LOCATION-aiplatform.googleapis.com` host is also accepted.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -235,7 +236,7 @@ class VertexAIProvider(LLMProvider):
             kwargs["api_key"] = google_api_key
         self.client = genai.Client(**kwargs)
 
-    def complete(
+    async def complete(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -245,6 +246,27 @@ class VertexAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         stream_handler: StreamHandler | None = None,
         count_usage: Callable[..., Any] | None = None,
+    ) -> Completion:
+        return await asyncio.to_thread(
+            self._complete_sync,
+            messages,
+            model,
+            tools,
+            max_tokens,
+            reasoning_effort,
+            stream_handler,
+            count_usage,
+        )
+
+    def _complete_sync(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        reasoning_effort: str | None,
+        stream_handler: StreamHandler | None,
+        count_usage: Callable[..., Any] | None,
     ) -> Completion:
         from google.genai import types
 

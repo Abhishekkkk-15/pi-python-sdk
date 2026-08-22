@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
-from openai import OpenAI
+import httpx
+from openai import AsyncOpenAI
 
 from pi_sdk.providers.base import (
     AssistantMessage,
@@ -85,7 +85,7 @@ class OpenAIProvider(LLMProvider):
         self.name = name
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.client = OpenAI(api_key=api_key, base_url=self.base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=self.base_url)
 
     def uses_responses_api(self) -> bool:
         """True for api.openai.com. Compat hosts do not implement /v1/responses."""
@@ -94,7 +94,7 @@ class OpenAIProvider(LLMProvider):
         host = (urlparse(self.base_url).hostname or "").lower()
         return host == "api.openai.com" or host.endswith(".api.openai.com")
 
-    def complete(
+    async def complete(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -106,7 +106,7 @@ class OpenAIProvider(LLMProvider):
         count_usage: Callable[..., Any] | None = None,
     ) -> Completion:
         if self.uses_responses_api():
-            return self._complete_responses(
+            return await self._complete_responses(
                 messages,
                 model=model,
                 tools=tools,
@@ -115,7 +115,7 @@ class OpenAIProvider(LLMProvider):
                 stream_handler=stream_handler,
                 count_usage=count_usage,
             )
-        return self._complete_chat(
+        return await self._complete_chat(
             messages,
             model=model,
             tools=tools,
@@ -129,7 +129,7 @@ class OpenAIProvider(LLMProvider):
     # Responses API (official OpenAI)
     # ------------------------------------------------------------------
 
-    def _complete_responses(
+    async def _complete_responses(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -157,7 +157,7 @@ class OpenAIProvider(LLMProvider):
         if reasoning_effort:
             kwargs["reasoning"] = {"effort": reasoning_effort}
 
-        stream = self.client.responses.create(**kwargs)
+        stream = await self.client.responses.create(**kwargs)
         ui = _StreamUI(stream_handler)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -171,7 +171,7 @@ class OpenAIProvider(LLMProvider):
                 or len(tool_calls)
             )
 
-        for event in stream:
+        async for event in stream:
             etype = _get_val(event, "type") or ""
 
             if etype in (
@@ -333,7 +333,7 @@ class OpenAIProvider(LLMProvider):
     # Chat Completions (compat hosts)
     # ------------------------------------------------------------------
 
-    def _complete_chat(
+    async def _complete_chat(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -360,11 +360,11 @@ class OpenAIProvider(LLMProvider):
                 kwargs["include_reasoning"] = True
 
         try:
-            stream = self.client.chat.completions.create(**kwargs)
+            stream = await self.client.chat.completions.create(**kwargs)
         except Exception:
             kwargs.pop("stream_options", None)
             kwargs.pop("reasoning_effort", None)
-            stream = self.client.chat.completions.create(**kwargs)
+            stream = await self.client.chat.completions.create(**kwargs)
 
         ui = _StreamUI(stream_handler)
         content_parts: list[str] = []
@@ -372,7 +372,7 @@ class OpenAIProvider(LLMProvider):
         tool_calls_map: dict[Any, dict[str, Any]] = {}
         usage_obj: Any = None
 
-        for chunk in stream:
+        async for chunk in stream:
             current_usage = _get_val(chunk, "usage")
             if current_usage:
                 usage_obj = current_usage
@@ -484,9 +484,10 @@ class OpenAIProvider(LLMProvider):
             headers = {"User-Agent": "pi-python/1.0"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            with httpx.Client(timeout=4.0) as client:
+                resp = client.get(url, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
                 if isinstance(data, dict):
                     return data.get("data", []) or []
                 if isinstance(data, list):

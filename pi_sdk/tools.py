@@ -1,12 +1,13 @@
+import asyncio
 import os
 import re
-import sys
-import time
-import threading
 import subprocess
+import sys
 from pathlib import Path
-from typing import Dict, List, Any
-from typing import Optional
+from typing import Any, Dict, List, Optional
+
+import aiofiles
+import httpx
 
 
 SKIP_DIR_NAMES = {
@@ -53,13 +54,18 @@ SKIP_FILE_SUFFIXES = {
 }
 
 
-def _kill_process_tree(pid: int):
+async def _kill_process_tree(pid: int):
     """Terminates a process tree cleanly cross-platform."""
     try:
         if sys.platform == "win32":
-            subprocess.run(f"taskkill /F /T /PID {pid}", shell=True, capture_output=True)
+            await asyncio.to_thread(
+                subprocess.run,
+                f"taskkill /F /T /PID {pid}",
+                shell=True,
+                capture_output=True,
+            )
         else:
-            os.kill(pid, 9)
+            await asyncio.to_thread(os.kill, pid, 9)
     except Exception:
         pass
 
@@ -67,7 +73,10 @@ def _kill_process_tree(pid: int):
 DEFAULT_MAX_LINES = 1000
 DEFAULT_MAX_BYTES = 50 * 1024  # 50KB
 
-def execute_read(path: str, offset: Optional[int] = None, limit: Optional[int] = None) -> str:
+
+async def execute_read(
+    path: str, offset: Optional[int] = None, limit: Optional[int] = None
+) -> str:
     """Reads and returns the contents of a text file, supporting offset and limit, with line formatting and truncation limits."""
     try:
         filepath = Path(path)
@@ -75,9 +84,10 @@ def execute_read(path: str, offset: Optional[int] = None, limit: Optional[int] =
             return f"Error: File '{path}' does not exist."
         if not filepath.is_file():
             return f"Error: '{path}' is a directory, not a file."
-        
+
         try:
-            content = filepath.read_text(encoding="utf-8")
+            async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+                content = await f.read()
         except UnicodeDecodeError:
             return f"Error: File '{path}' appears to be binary and not decodable as UTF-8 text."
 
@@ -100,21 +110,21 @@ def execute_read(path: str, offset: Optional[int] = None, limit: Optional[int] =
         bytes_accumulated = 0
         truncated = False
         truncated_by = None
-        
+
         for idx, line in enumerate(selected_lines):
             formatted_line = f"{start_line + idx + 1}: {line}"
             line_bytes = len(formatted_line.encode("utf-8")) + 1  # +1 for newline
-            
+
             if len(truncated_lines) >= DEFAULT_MAX_LINES:
                 truncated = True
                 truncated_by = "lines"
                 break
-                
+
             if bytes_accumulated + line_bytes > DEFAULT_MAX_BYTES:
                 truncated = True
                 truncated_by = "bytes"
                 break
-                
+
             truncated_lines.append(formatted_line)
             bytes_accumulated += line_bytes
 
@@ -138,7 +148,7 @@ def execute_read(path: str, offset: Optional[int] = None, limit: Optional[int] =
         return f"Error reading file '{path}': {str(e)}"
 
 
-def execute_write(path: str, content: str) -> str:
+async def execute_write(path: str, content: str) -> str:
     """Creates or completely overwrites a file with the given content."""
     try:
         filepath = Path(path)
@@ -146,7 +156,8 @@ def execute_write(path: str, content: str) -> str:
         # Create parent directories if they don't exist
         filepath.parent.mkdir(parents=True, exist_ok=True)
         text = content or ""
-        filepath.write_text(text, encoding="utf-8")
+        async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
+            await f.write(text)
         lines = len(text.splitlines()) if text else 0
         nbytes = len(text.encode("utf-8"))
         action = "Overwrote" if existed else "Created"
@@ -155,7 +166,7 @@ def execute_write(path: str, content: str) -> str:
         return f"Error writing file '{path}': {str(e)}"
 
 
-def execute_edit(path: str, edits: List[Dict[str, str]]) -> str:
+async def execute_edit(path: str, edits: List[Dict[str, str]]) -> str:
     """
     Applies parallel exact search-and-replace edits to a file.
     All edits are matched against the original file state before any modifications occur.
@@ -165,10 +176,11 @@ def execute_edit(path: str, edits: List[Dict[str, str]]) -> str:
         if not filepath.exists():
             return f"Error: File '{path}' does not exist."
 
-        content = filepath.read_text(encoding="utf-8")
+        async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+            content = await f.read()
         # 1. Normalize CRLF to LF for matching consistency
         normalized_content = content.replace("\r\n", "\n")
-        
+
         matches = []
         for i, edit in enumerate(edits):
             old_text = (edit.get("oldText", "") or "").replace("\r\n", "\n")
@@ -220,12 +232,12 @@ def execute_edit(path: str, edits: List[Dict[str, str]]) -> str:
         if "\r\n" in content:
             new_content = new_content.replace("\n", "\r\n")
 
-        filepath.write_text(new_content, encoding="utf-8")
+        async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
+            await f.write(new_content)
         return f"Applied {len(edits)} edit(s) to '{path}' successfully."
 
     except Exception as e:
         return f"Error editing file '{path}': {str(e)}"
-
 
 
 MAX_BASH_LINES = 2000
@@ -271,7 +283,9 @@ def _truncate_bash_output(output: str) -> str:
     return text
 
 
-def execute_bash(command: str, timeout: int = 30, is_background: bool = False) -> str:
+async def execute_bash(
+    command: str, timeout: int = 30, is_background: bool = False
+) -> str:
     """
     Executes a terminal command cross-platform without hanging or freezing.
     Auto-detects or handles long-running server commands (e.g. npm run dev, vite),
@@ -302,44 +316,39 @@ def execute_bash(command: str, timeout: int = 30, is_background: bool = False) -
         if sys.platform == "win32" and should_run_bg:
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
-        proc = subprocess.Popen(
+        proc = await asyncio.create_subprocess_shell(
             command,
-            shell=True,
-            stdin=subprocess.DEVNULL,  # Prevents interactive CLI prompts from blocking on stdin
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             env=env,
-            creationflags=creationflags
+            creationflags=creationflags,
         )
 
         stdout_lines: List[str] = []
         stderr_lines: List[str] = []
 
-        def _read_stream(stream, output_list):
+        async def _read_stream(stream, output_list):
             try:
-                for line in iter(stream.readline, ''):
-                    output_list.append(line)
-                stream.close()
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    output_list.append(line.decode("utf-8", errors="replace"))
             except Exception:
                 pass
 
-        t_out = threading.Thread(target=_read_stream, args=(proc.stdout, stdout_lines), daemon=True)
-        t_err = threading.Thread(target=_read_stream, args=(proc.stderr, stderr_lines), daemon=True)
-        t_out.start()
-        t_err.start()
+        read_stdout = asyncio.create_task(_read_stream(proc.stdout, stdout_lines))
+        read_stderr = asyncio.create_task(_read_stream(proc.stderr, stderr_lines))
 
         wait_limit = 4 if should_run_bg else timeout
-        start_time = time.time()
 
-        while time.time() - start_time < wait_limit:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=wait_limit)
+        except asyncio.TimeoutError:
+            pass
 
-        is_running = proc.poll() is None
+        is_running = proc.returncode is None
 
         if is_running:
             if should_run_bg:
@@ -352,12 +361,14 @@ def execute_bash(command: str, timeout: int = 30, is_background: bool = False) -
             else:
                 output = "".join(stdout_lines) + "".join(stderr_lines)
                 output_str = _truncate_bash_output(output) if output else "[No output received before timeout]"
-                _kill_process_tree(proc.pid)
+                await _kill_process_tree(proc.pid)
+                await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
                 return (
                     f"{output_str}\n\n"
                     f"[Error: Command timed out after {timeout} seconds and was terminated.]"
                 )
 
+        await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
         output = "".join(stdout_lines) + "".join(stderr_lines)
         if not output.strip():
             return "[Command finished with no output]"
@@ -367,7 +378,7 @@ def execute_bash(command: str, timeout: int = 30, is_background: bool = False) -
         return f"Error executing command: {str(e)}"
 
 
-def execute_web_search(query: str, max_results: int = 5) -> str:
+async def execute_web_search(query: str, max_results: int = 5) -> str:
     """Executes a real-time web search using the Tavily API."""
     from pi_sdk.config import get_tavily_api_key
 
@@ -381,19 +392,25 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
     try:
         try:
             from tavily import TavilyClient
+
             client = TavilyClient(api_key=api_key)
-            response = client.search(query=query, max_results=max_results)
+            response = await asyncio.to_thread(
+                client.search, query=query, max_results=max_results
+            )
             results = response.get("results", [])
         except ImportError:
-            import urllib.request
-            import json
-            req = urllib.request.Request(
-                "https://api.tavily.com/search",
-                data=json.dumps({"api_key": api_key, "query": query, "max_results": max_results}).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": api_key,
+                        "query": query,
+                        "max_results": max_results,
+                    },
+                    headers={"Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
                 results = data.get("results", [])
 
         if not results:
@@ -412,7 +429,7 @@ def execute_web_search(query: str, max_results: int = 5) -> str:
         return f"Error executing web search: {str(e)}"
 
 
-def execute_grep(
+async def execute_grep(
     pattern: str,
     path: str = ".",
     glob: str = "",
@@ -470,7 +487,10 @@ def execute_grep(
 
             files_searched += 1
             try:
-                text = filepath.read_text(encoding="utf-8", errors="ignore")
+                async with aiofiles.open(
+                    filepath, "r", encoding="utf-8", errors="ignore"
+                ) as f:
+                    text = await f.read()
             except OSError:
                 continue
 

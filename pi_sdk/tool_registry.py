@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
-ToolHandler = Callable[..., Any]
+ToolHandler = Callable[..., Any | Awaitable[Any]]
 
 
 @dataclass
@@ -74,7 +74,7 @@ def tool_to_openai_schema(spec: ToolSpec) -> dict[str, Any]:
     }
 
 
-def _call_handler(handler: ToolHandler, args: dict[str, Any]) -> str:
+async def _call_handler(handler: ToolHandler, args: dict[str, Any]) -> str:
     """Invoke handler with kwargs filtered to its signature when possible."""
     try:
         sig = inspect.signature(handler)
@@ -95,11 +95,11 @@ def _call_handler(handler: ToolHandler, args: dict[str, Any]) -> str:
                 )
             }
             filtered = {k: v for k, v in args.items() if k in allowed}
-            # Fill defaults-only params that are required without default? skip
             result = handler(**filtered)
     except TypeError:
-        # Fall back to full kwargs
         result = handler(**args)
+    if inspect.isawaitable(result):
+        result = await result
     if result is None:
         return ""
     return result if isinstance(result, str) else str(result)
@@ -174,11 +174,11 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
-    def dispatch(self, name: str, arguments: dict[str, Any]) -> str:
+    async def dispatch(self, name: str, arguments: dict[str, Any]) -> str:
         spec = self._tools.get(name)
         if not spec or not spec.handler:
             raise KeyError(name)
-        return _call_handler(spec.handler, arguments)
+        return await _call_handler(spec.handler, arguments)
 
     def permission_target(self, name: str, args: dict[str, Any]) -> str:
         spec = self._tools.get(name)

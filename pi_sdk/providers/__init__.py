@@ -5,7 +5,7 @@ To add a provider (e.g. Anthropic):
    and implements `complete()` + `list_models()`.
 2. Register it in `create_provider()` below (match `name` / base_url).
 3. Optionally add a builtin entry in `config.BUILTIN_PROVIDERS`.
-4. Do not put SDK calls in `llm.py` — Agent only uses `self.llm.complete(...)`.
+4. Do not put SDK calls in `llm.py` — Agent only uses `await self.llm.complete(...)`.
 """
 
 from pi_sdk.providers.base import Completion, LLMProvider, ModelInfo, StreamHandler
