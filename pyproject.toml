@@ -44,4 +44,4 @@ where = ["."]
 include = ["pi_sdk*"]
 
 [tool.setuptools.package-data]
-pi_sdk = ["prompts/*.md"]
+pi_sdk = ["prompts/*.md", "py.typed"]
