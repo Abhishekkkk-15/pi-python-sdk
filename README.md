@@ -175,7 +175,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
-Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`.
+Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`.
 
 ---
 
@@ -297,6 +297,18 @@ agent.grant_permission(PermissionDecision.ALWAYS_TOOL, "read", ".")
 | `bash` | Shell command | timeout, background |
 | `grep` | Workspace search | glob, case fold |
 | `web_search` | Live web search | needs Tavily key |
+
+### Windows / Git Bash (`bash` tool)
+
+On Windows, the `bash` tool prefers **Git Bash** when installed (so Unix commands like `pwd` and `ls` work during local dev). Auto-detected paths include `C:\Program Files\Git\bin\bash.exe`.
+
+To point at a specific bash:
+
+```bash
+export PI_SDK_BASH="/c/Program Files/Git/bin/bash.exe"
+```
+
+If async subprocess is unsupported by your event loop (some uvicorn setups), the SDK falls back to sync `subprocess` automatically.
 
 ### Custom tools
 
