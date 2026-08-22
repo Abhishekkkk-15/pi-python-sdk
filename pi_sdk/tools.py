@@ -283,6 +283,195 @@ def _truncate_bash_output(output: str) -> str:
     return text
 
 
+def _format_bash_error(exc: BaseException) -> str:
+    msg = str(exc).strip()
+    if msg:
+        return f"Error executing command: {msg}"
+    return f"Error executing command: {type(exc).__name__}"
+
+
+def _resolve_windows_bash() -> Optional[Path]:
+    """Prefer Git Bash on Windows for Unix-style commands (pwd, ls, etc.)."""
+    for key in ("PI_SDK_BASH", "BASH"):
+        raw = (os.environ.get(key) or "").strip()
+        if raw:
+            path = Path(raw)
+            if path.is_file():
+                return path
+
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    candidates = [
+        Path(program_files) / "Git" / "bin" / "bash.exe",
+        Path(program_files_x86) / "Git" / "bin" / "bash.exe",
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _build_bash_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["CI"] = "true"
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    env["npm_config_yes"] = "true"
+    env["NONINTERACTIVE"] = "1"
+    env["FORCE_COLOR"] = "0"
+    env["NO_COLOR"] = "1"
+    env["PIP_NO_INPUT"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _run_bash_blocking(
+    command: str,
+    timeout: int,
+    should_run_bg: bool,
+    env: dict[str, str],
+    creationflags: int,
+) -> str:
+    """Run bash via subprocess.run/Popen (works on any asyncio event loop)."""
+    bash = _resolve_windows_bash() if sys.platform == "win32" else None
+    use_shell = bash is None
+    popen_args: Any = command
+    run_args: Any = command
+    if bash is not None:
+        popen_args = [str(bash), "-lc", command]
+        run_args = popen_args
+
+    wait_limit = 4 if should_run_bg else timeout
+
+    if should_run_bg:
+        proc = subprocess.Popen(
+            popen_args,
+            shell=use_shell,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=creationflags,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=wait_limit)
+        except subprocess.TimeoutExpired:
+            output = (stdout or "") + (stderr or "")
+            output_str = _truncate_bash_output(output) if output else "[Process started successfully]"
+            return (
+                f"{output_str}\n\n"
+                f"[Background process started and running with PID {proc.pid}]"
+            )
+        output = (stdout or "") + (stderr or "")
+        if not output.strip():
+            return "[Command finished with no output]"
+        return _truncate_bash_output(output)
+
+    try:
+        completed = subprocess.run(
+            run_args,
+            shell=use_shell,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=wait_limit,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        return f"[Error: Command timed out after {timeout} seconds and was terminated.]"
+
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if not output.strip():
+        return "[Command finished with no output]"
+    return _truncate_bash_output(output)
+
+
+async def _execute_bash_async(
+    command: str,
+    timeout: int,
+    should_run_bg: bool,
+    env: dict[str, str],
+    creationflags: int,
+) -> str:
+    bash = _resolve_windows_bash() if sys.platform == "win32" else None
+
+    if bash is not None:
+        proc = await asyncio.create_subprocess_exec(
+            str(bash),
+            "-lc",
+            command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            creationflags=creationflags,
+        )
+    else:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            creationflags=creationflags,
+        )
+
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    async def _read_stream(stream, output_list):
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                output_list.append(line.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    read_stdout = asyncio.create_task(_read_stream(proc.stdout, stdout_lines))
+    read_stderr = asyncio.create_task(_read_stream(proc.stderr, stderr_lines))
+
+    wait_limit = 4 if should_run_bg else timeout
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=wait_limit)
+    except asyncio.TimeoutError:
+        pass
+
+    is_running = proc.returncode is None
+
+    if is_running:
+        if should_run_bg:
+            output = "".join(stdout_lines) + "".join(stderr_lines)
+            output_str = _truncate_bash_output(output) if output else "[Process started successfully]"
+            return (
+                f"{output_str}\n\n"
+                f"[Background process started and running with PID {proc.pid}]"
+            )
+        output = "".join(stdout_lines) + "".join(stderr_lines)
+        output_str = _truncate_bash_output(output) if output else "[No output received before timeout]"
+        await _kill_process_tree(proc.pid)
+        await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
+        return (
+            f"{output_str}\n\n"
+            f"[Error: Command timed out after {timeout} seconds and was terminated.]"
+        )
+
+    await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
+    output = "".join(stdout_lines) + "".join(stderr_lines)
+    if not output.strip():
+        return "[Command finished with no output]"
+    return _truncate_bash_output(output)
+
+
 async def execute_bash(
     command: str, timeout: int = 30, is_background: bool = False
 ) -> str:
@@ -291,6 +480,11 @@ async def execute_bash(
     Auto-detects or handles long-running server commands (e.g. npm run dev, vite),
     prevents interactive CLI prompt hangs using stdin=DEVNULL,
     and kills processes cleanly on timeout to prevent lingering process leaks.
+
+    On Windows, prefers Git Bash (``bash.exe``) when installed so Unix commands
+    like ``pwd`` and ``ls`` work during local development. Set ``PI_SDK_BASH`` to
+    override the bash path. Falls back to ``cmd.exe`` via ``asyncio.to_thread``
+    when the event loop does not support async subprocess (common on Windows).
     """
     bg_keywords = [
         "npm run dev", "npm start", "vite", "next dev", "ng serve",
@@ -301,81 +495,30 @@ async def execute_bash(
     auto_bg = any(kw in command_lower for kw in bg_keywords)
     should_run_bg = is_background or auto_bg
 
+    env = _build_bash_env()
+    creationflags = 0
+    if sys.platform == "win32" and should_run_bg:
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
     try:
-        env = os.environ.copy()
-        env["CI"] = "true"
-        env["DEBIAN_FRONTEND"] = "noninteractive"
-        env["npm_config_yes"] = "true"
-        env["NONINTERACTIVE"] = "1"
-        env["FORCE_COLOR"] = "0"
-        env["NO_COLOR"] = "1"
-        env["PIP_NO_INPUT"] = "1"
-        env["GIT_TERMINAL_PROMPT"] = "0"
-
-        creationflags = 0
-        if sys.platform == "win32" and should_run_bg:
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            creationflags=creationflags,
+        return await _execute_bash_async(
+            command, timeout, should_run_bg, env, creationflags
         )
-
-        stdout_lines: List[str] = []
-        stderr_lines: List[str] = []
-
-        async def _read_stream(stream, output_list):
-            try:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
-                    output_list.append(line.decode("utf-8", errors="replace"))
-            except Exception:
-                pass
-
-        read_stdout = asyncio.create_task(_read_stream(proc.stdout, stdout_lines))
-        read_stderr = asyncio.create_task(_read_stream(proc.stderr, stderr_lines))
-
-        wait_limit = 4 if should_run_bg else timeout
-
+    except NotImplementedError:
+        # Windows SelectorEventLoop (e.g. some uvicorn setups) — sync fallback.
         try:
-            await asyncio.wait_for(proc.wait(), timeout=wait_limit)
-        except asyncio.TimeoutError:
-            pass
-
-        is_running = proc.returncode is None
-
-        if is_running:
-            if should_run_bg:
-                output = "".join(stdout_lines) + "".join(stderr_lines)
-                output_str = _truncate_bash_output(output) if output else "[Process started successfully]"
-                return (
-                    f"{output_str}\n\n"
-                    f"[Background process started and running with PID {proc.pid}]"
-                )
-            else:
-                output = "".join(stdout_lines) + "".join(stderr_lines)
-                output_str = _truncate_bash_output(output) if output else "[No output received before timeout]"
-                await _kill_process_tree(proc.pid)
-                await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
-                return (
-                    f"{output_str}\n\n"
-                    f"[Error: Command timed out after {timeout} seconds and was terminated.]"
-                )
-
-        await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
-        output = "".join(stdout_lines) + "".join(stderr_lines)
-        if not output.strip():
-            return "[Command finished with no output]"
-        return _truncate_bash_output(output)
-
+            return await asyncio.to_thread(
+                _run_bash_blocking,
+                command,
+                timeout,
+                should_run_bg,
+                env,
+                creationflags,
+            )
+        except Exception as exc:
+            return _format_bash_error(exc)
     except Exception as e:
-        return f"Error executing command: {str(e)}"
+        return _format_bash_error(e)
 
 
 async def execute_web_search(query: str, max_results: int = 5) -> str:
