@@ -176,7 +176,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
-Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`.
+Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`, `PI_SDK_DOCKER_CONTAINER`, `DOCKER_CONTAINER`.
 
 ### Custom identity (`base_prompt`)
 
@@ -311,7 +311,8 @@ agent.grant_permission(PermissionDecision.ALWAYS_TOOL, "read", ".")
 | `read` | Read file (offset/limit) | Text files |
 | `write` | Create / overwrite file | |
 | `edit` | Exact string replacements | |
-| `bash` | Shell command | timeout, background |
+| `bash` | Shell command on the **host** | timeout, background |
+| `docker_bash` | Shell command **inside a container** | `docker exec`, timeout, background |
 | `grep` | Workspace search | glob, case fold |
 | `web_search` | Live web search | needs Tavily key |
 
@@ -326,6 +327,35 @@ export PI_SDK_BASH="/c/Program Files/Git/bin/bash.exe"
 ```
 
 If async subprocess is unsupported by your event loop (some uvicorn setups), the SDK falls back to sync `subprocess` automatically.
+
+### Docker (`docker_bash` tool)
+
+Use `docker_bash` when project commands must run inside a container (tests, package installs, migrations). It wraps `docker exec -i` and shares the same timeout/background behavior as `bash`.
+
+Container resolution order:
+
+1. `container` argument on the tool call
+2. `PI_SDK_DOCKER_CONTAINER` env var
+3. `DOCKER_CONTAINER` env var
+
+```bash
+export PI_SDK_DOCKER_CONTAINER=my-app
+```
+
+Typical setup for container-only workflows:
+
+```python
+agent = Agent.create(
+    api_key="...",
+    cwd="/workspace/proj",
+    disable_tools=["bash"],          # host shell off
+    # docker_bash stays enabled (default)
+)
+```
+
+Optional per-call overrides the model can use: `workdir` (`docker exec -w`), `user` (`docker exec -u`), `timeout`, `is_background`.
+
+See `examples/docker_bash.py`.
 
 ### Custom tools
 
@@ -382,14 +412,17 @@ The model receives the tool **name**, **description**, and **parameters** schema
 
 ### Disable / select default tools
 
-Builtins are on by default: `read`, `write`, `edit`, `bash`, `grep`, `web_search` (`BUILTIN_TOOL_NAMES`).
+Builtins are on by default: `read`, `write`, `edit`, `bash`, `docker_bash`, `grep`, `web_search` (`BUILTIN_TOOL_NAMES`).
 
 ```python
 # Denylist — keep all builtins except these
 Agent.create(api_key="...", disable_tools=["bash", "write", "web_search"])
 
+# Container-only shell — disable host bash, keep docker_bash
+Agent.create(api_key="...", disable_tools=["bash"])
+
 # Allowlist — only these builtins
-Agent.create(api_key="...", enable_tools=["read", "grep"])
+Agent.create(api_key="...", enable_tools=["read", "grep", "docker_bash"])
 
 # No builtins — only what you add via extra_tools / add_tool
 Agent.create(api_key="...", default_tools=False)
@@ -504,6 +537,7 @@ python examples/session_chat.py          # multi-turn + resume(session_id)
 python examples/custom_tool.py           # register custom tools
 python examples/mongodb_session.py       # MongoDB create + resume (needs URI)
 python examples/tools_read_grep.py       # read + grep tools
+python examples/docker_bash.py           # docker_bash (needs running container)
 python examples/permissions_demo.py      # allow read/grep, deny write/bash
 python examples/stream_events.py "What is in README.md?"
 python examples/basic.py "Summarize this repo"
@@ -517,6 +551,7 @@ python examples/cloud_worker.py . "List the top-level files"
 | `custom_tool.py` | `add_tool` name/description/parameters/handler |
 | `mongodb_session.py` | Same flow with `storage="mongodb"` + `user_id` |
 | `tools_read_grep.py` | Tool use with live events |
+| `docker_bash.py` | `docker_bash` inside a running container |
 | `permissions_demo.py` | `permission_callback` allow/deny |
 | `stream_events.py` | Token streaming to stdout |
 | `basic.py` | One-shot run |
