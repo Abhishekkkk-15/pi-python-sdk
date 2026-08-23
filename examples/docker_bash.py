@@ -6,10 +6,11 @@ Setup:
 
 Run (from sdk/):
   python examples/docker_bash.py <container-name-or-id>
-  python examples/docker_bash.py my-app "Show pwd and list files in /app"
+  python examples/docker_bash.py my-app /app
+  python examples/docker_bash.py my-app /app "Show pwd and list files"
 
-The container is passed to Agent.create(docker_container=...) — the recommended
-approach for cloud workers where each user has their own container.
+Container + workdir are passed to Agent.create(docker_container=..., docker_workdir=...)
+— the recommended approach for cloud workers where each user has their own container.
 """
 
 from __future__ import annotations
@@ -33,6 +34,25 @@ def _resolve_container(argv: list[str]) -> str | None:
         if val:
             return val
     return None
+
+
+def _resolve_workdir(argv: list[str]) -> str | None:
+    # argv[2] looks like a path if it starts with / or .
+    if len(argv) > 2 and argv[2].strip() and (
+        argv[2].startswith("/") or argv[2].startswith(".")
+    ):
+        return argv[2].strip()
+    for key in ("PI_SDK_DOCKER_WORKDIR", "DOCKER_WORKDIR"):
+        val = (os.getenv(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _resolve_prompt(argv: list[str], workdir: str | None) -> str:
+    # If argv[2] was consumed as workdir, prompt starts at argv[3]
+    start = 3 if workdir and len(argv) > 2 and argv[2].strip() == workdir else 2
+    return " ".join(argv[start:]).strip()
 
 
 def _container_is_running(container: str) -> bool:
@@ -59,7 +79,7 @@ async def main() -> int:
     if not container:
         print(
             "Pass a running container name or ID:\n"
-            "  python examples/docker_bash.py <container>",
+            "  python examples/docker_bash.py <container> [workdir]",
             file=sys.stderr,
         )
         return 1
@@ -72,9 +92,9 @@ async def main() -> int:
         )
         return 1
 
-    user_prompt = (
-        " ".join(sys.argv[2:]).strip()
-        or "Use docker_bash to run `pwd && ls -la` inside the container. "
+    workdir = _resolve_workdir(sys.argv)
+    user_prompt = _resolve_prompt(sys.argv, workdir) or (
+        "Use docker_bash to run `pwd && ls -la` inside the container. "
         "Reply with the command output in 5 lines or fewer."
     )
 
@@ -92,14 +112,16 @@ async def main() -> int:
         autonomous=True,
         disable_tools=["bash"],
         docker_container=container,
+        docker_workdir=workdir,
         on_event=on_event,
     )
 
-    print(f"model={MODEL} container={container}\n")
+    print(f"model={MODEL} container={container} workdir={workdir or '(container default)'}\n")
     result = await agent.run(
         f"{user_prompt}\n\n"
-        f"The default container is already configured as {container!r}; "
-        "you do not need to pass container= unless switching containers."
+        f"The default container is already configured as {container!r}"
+        + (f" with workdir {workdir!r}" if workdir else "")
+        + "; you do not need to pass container=/workdir= unless overriding."
     )
     print("\n\n---")
     if result.status != "ok":

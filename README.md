@@ -163,6 +163,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `enable_tools` | `list[str]` | `None` | Allowlist of builtin names |
 | `disable_tools` | `list[str]` | `[]` | Denylist of builtin names |
 | `docker_container` | `str` | `None` | Default container for `docker_bash` (per agent/user) |
+| `docker_workdir` | `str` | `None` | Default workdir inside container for `docker_bash` |
 | `tavily_api_key` | `str` | `TAVILY_API_KEY` | Enables `web_search` |
 | `autonomous` | `bool` | `True` | Skip permission checks |
 | `permission_callback` | `callable` | `None` | `(tool, target, details) -> bool` |
@@ -177,7 +178,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
-Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`, `PI_SDK_DOCKER_CONTAINER`, `DOCKER_CONTAINER`.
+Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`, `PI_SDK_DOCKER_CONTAINER`, `DOCKER_CONTAINER`, `PI_SDK_DOCKER_WORKDIR`, `DOCKER_WORKDIR`.
 
 ### Custom identity (`base_prompt`)
 
@@ -340,12 +341,20 @@ Container resolution order:
 3. `PI_SDK_DOCKER_CONTAINER` env var (local dev fallback)
 4. `DOCKER_CONTAINER` env var
 
+Workdir resolution order (`docker exec -w`):
+
+1. `workdir` argument on the tool call
+2. `Agent.create(docker_workdir=...)` — **recommended for cloud** (path *inside* the container; not the same as host `cwd`)
+3. `PI_SDK_DOCKER_WORKDIR` / `DOCKER_WORKDIR` env vars
+4. Omit `-w` (container default)
+
 ```python
 # Cloud: one agent (or worker invocation) per user container
 agent = Agent.create(
     api_key="...",
-    cwd=f"/data/users/{user_id}/workspace",
+    cwd=f"/data/users/{user_id}/workspace",  # host workspace (read/write/edit)
     docker_container=user_container_id,
+    docker_workdir="/workspace",             # path inside the container
     disable_tools=["bash"],
     autonomous=True,
 )
@@ -355,6 +364,7 @@ Local dev can still use env:
 
 ```bash
 export PI_SDK_DOCKER_CONTAINER=my-app
+export PI_SDK_DOCKER_WORKDIR=/app
 ```
 
 Typical setup for container-only workflows:
@@ -364,12 +374,13 @@ agent = Agent.create(
     api_key="...",
     cwd="/workspace/proj",
     docker_container="my-app",
+    docker_workdir="/app",
     disable_tools=["bash"],          # host shell off
     # docker_bash stays enabled (default)
 )
 ```
 
-Optional per-call overrides the model can use: `workdir` (`docker exec -w`), `user` (`docker exec -u`), `timeout`, `is_background`.
+Optional per-call overrides the model can use: `workdir`, `user` (`docker exec -u`), `timeout`, `is_background`.
 
 See `examples/docker_bash.py`.
 

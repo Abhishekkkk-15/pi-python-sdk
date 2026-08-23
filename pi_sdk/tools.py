@@ -662,6 +662,23 @@ def _resolve_docker_container(
     return None
 
 
+def _resolve_docker_workdir(
+    workdir: Optional[str] = None,
+    default_workdir: Optional[str] = None,
+) -> Optional[str]:
+    raw = (workdir or "").strip()
+    if raw:
+        return raw
+    default = (default_workdir or "").strip()
+    if default:
+        return default
+    for key in ("PI_SDK_DOCKER_WORKDIR", "DOCKER_WORKDIR"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
 def _build_docker_exec_argv(
     command: str,
     container: str,
@@ -687,6 +704,7 @@ async def execute_docker_bash(
     timeout: int = 30,
     is_background: bool = False,
     default_container: Optional[str] = None,
+    default_workdir: Optional[str] = None,
 ) -> str:
     """
     Executes a bash command inside a running Docker container via ``docker exec``.
@@ -694,6 +712,11 @@ async def execute_docker_bash(
     Container resolution order: ``container`` argument, then ``default_container``
     (typically from ``Agent.create(docker_container=...)``), then
     ``PI_SDK_DOCKER_CONTAINER``, then ``DOCKER_CONTAINER``.
+
+    Workdir resolution order: ``workdir`` argument, then ``default_workdir``
+    (typically from ``Agent.create(docker_workdir=...)``), then
+    ``PI_SDK_DOCKER_WORKDIR``, then ``DOCKER_WORKDIR``. Omit ``-w`` if unset.
+
     Requires Docker CLI on the host and a running container.
     """
     resolved_container = _resolve_docker_container(
@@ -706,6 +729,10 @@ async def execute_docker_bash(
             "or set PI_SDK_DOCKER_CONTAINER / DOCKER_CONTAINER."
         )
 
+    resolved_workdir = _resolve_docker_workdir(
+        workdir, default_workdir=default_workdir
+    )
+
     should_run_bg = _should_run_background(command, is_background)
     env = _build_bash_env()
     creationflags = 0
@@ -715,7 +742,7 @@ async def execute_docker_bash(
     argv = _build_docker_exec_argv(
         command,
         resolved_container,
-        workdir=workdir,
+        workdir=resolved_workdir,
         user=user,
     )
 
@@ -1012,7 +1039,11 @@ TOOLS = [
                     },
                     "workdir": {
                         "type": "string",
-                        "description": "Working directory inside the container (docker exec -w)."
+                        "description": (
+                            "Working directory inside the container (docker exec -w). "
+                            "Defaults to Agent.create(docker_workdir=...), then "
+                            "PI_SDK_DOCKER_WORKDIR or DOCKER_WORKDIR env var."
+                        )
                     },
                     "user": {
                         "type": "string",
