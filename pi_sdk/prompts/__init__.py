@@ -54,7 +54,8 @@ class Prompt:
         tools = selected_tools or ["read", "bash", "edit", "write"]
         default_snippets = {
             "read": "Read file contents (supports text and images).",
-            "bash": "Execute terminal commands.",
+            "bash": "Execute terminal commands on the host.",
+            "docker_bash": "Execute terminal commands inside a Docker container.",
             "edit": "Make targeted file edits via exact string replacements.",
             "write": "Create new files or overwrite existing ones.",
             "grep": "Search workspace for text/regex patterns.",
@@ -78,8 +79,15 @@ class Prompt:
                 guidelines_set.add(g_clean)
                 guidelines_list.append(g_clean)
 
-        if "bash" in tools and not any(t in tools for t in ["grep", "find", "ls"]):
+        if "bash" in tools and "docker_bash" not in tools and not any(
+            t in tools for t in ["grep", "find", "ls"]
+        ):
             add_guideline("Use bash for file operations like ls, rg, find")
+        if "docker_bash" in tools:
+            add_guideline(
+                "Use docker_bash for commands that must run inside the project container "
+                "(tests, package installs, migrations); use bash for host-only tasks"
+            )
 
         for g in prompt_guidelines or []:
             add_guideline(g)

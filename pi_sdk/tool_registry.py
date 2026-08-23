@@ -200,6 +200,7 @@ BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "write",
     "edit",
     "bash",
+    "docker_bash",
     "web_search",
     "grep",
 )
@@ -223,6 +224,7 @@ def build_builtin_registry(
     from pi_sdk.tools import (
         TOOLS,
         execute_bash,
+        execute_docker_bash,
         execute_edit,
         execute_grep,
         execute_read,
@@ -238,6 +240,14 @@ def build_builtin_registry(
         "edit": lambda path, edits=None, **_: execute_edit(path, edits or []),
         "bash": lambda command, timeout=30, is_background=False, **_: execute_bash(
             command, timeout=timeout, is_background=is_background
+        ),
+        "docker_bash": lambda command, container=None, workdir=None, user=None, timeout=30, is_background=False, **_: execute_docker_bash(
+            command,
+            container=container,
+            workdir=workdir,
+            user=user,
+            timeout=timeout,
+            is_background=is_background,
         ),
         "web_search": lambda query, max_results=5, **_: execute_web_search(
             query, max_results=max_results
@@ -255,6 +265,7 @@ def build_builtin_registry(
         "write": "path",
         "edit": "path",
         "bash": "command",
+        "docker_bash": "command",
         "web_search": "query",
         "grep": "path",
     }

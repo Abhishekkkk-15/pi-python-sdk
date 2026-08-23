@@ -393,6 +393,127 @@ def _run_bash_blocking(
     return _truncate_bash_output(output)
 
 
+async def _execute_subprocess_argv(
+    argv: List[str],
+    timeout: int,
+    should_run_bg: bool,
+    env: dict[str, str],
+    creationflags: int,
+) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        creationflags=creationflags,
+    )
+
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    async def _read_stream(stream, output_list):
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                output_list.append(line.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    read_stdout = asyncio.create_task(_read_stream(proc.stdout, stdout_lines))
+    read_stderr = asyncio.create_task(_read_stream(proc.stderr, stderr_lines))
+
+    wait_limit = 4 if should_run_bg else timeout
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=wait_limit)
+    except asyncio.TimeoutError:
+        pass
+
+    is_running = proc.returncode is None
+
+    if is_running:
+        if should_run_bg:
+            output = "".join(stdout_lines) + "".join(stderr_lines)
+            output_str = _truncate_bash_output(output) if output else "[Process started successfully]"
+            return (
+                f"{output_str}\n\n"
+                f"[Background process started and running with PID {proc.pid}]"
+            )
+        output = "".join(stdout_lines) + "".join(stderr_lines)
+        output_str = _truncate_bash_output(output) if output else "[No output received before timeout]"
+        await _kill_process_tree(proc.pid)
+        await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
+        return (
+            f"{output_str}\n\n"
+            f"[Error: Command timed out after {timeout} seconds and was terminated.]"
+        )
+
+    await asyncio.gather(read_stdout, read_stderr, return_exceptions=True)
+    output = "".join(stdout_lines) + "".join(stderr_lines)
+    if not output.strip():
+        return "[Command finished with no output]"
+    return _truncate_bash_output(output)
+
+
+def _run_subprocess_argv_blocking(
+    argv: List[str],
+    timeout: int,
+    should_run_bg: bool,
+    env: dict[str, str],
+    creationflags: int,
+) -> str:
+    wait_limit = 4 if should_run_bg else timeout
+
+    if should_run_bg:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            creationflags=creationflags,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=wait_limit)
+        except subprocess.TimeoutExpired:
+            output = (stdout or "") + (stderr or "")
+            output_str = _truncate_bash_output(output) if output else "[Process started successfully]"
+            return (
+                f"{output_str}\n\n"
+                f"[Background process started and running with PID {proc.pid}]"
+            )
+        output = (stdout or "") + (stderr or "")
+        if not output.strip():
+            return "[Command finished with no output]"
+        return _truncate_bash_output(output)
+
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=wait_limit,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        return f"[Error: Command timed out after {timeout} seconds and was terminated.]"
+
+    output = (completed.stdout or "") + (completed.stderr or "")
+    if not output.strip():
+        return "[Command finished with no output]"
+    return _truncate_bash_output(output)
+
+
 async def _execute_bash_async(
     command: str,
     timeout: int,
@@ -403,25 +524,22 @@ async def _execute_bash_async(
     bash = _resolve_windows_bash() if sys.platform == "win32" else None
 
     if bash is not None:
-        proc = await asyncio.create_subprocess_exec(
-            str(bash),
-            "-lc",
-            command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            creationflags=creationflags,
+        return await _execute_subprocess_argv(
+            [str(bash), "-lc", command],
+            timeout,
+            should_run_bg,
+            env,
+            creationflags,
         )
-    else:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            creationflags=creationflags,
-        )
+
+    proc = await asyncio.create_subprocess_shell(
+        command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        creationflags=creationflags,
+    )
 
     stdout_lines: List[str] = []
     stderr_lines: List[str] = []
@@ -486,14 +604,7 @@ async def execute_bash(
     override the bash path. Falls back to ``cmd.exe`` via ``asyncio.to_thread``
     when the event loop does not support async subprocess (common on Windows).
     """
-    bg_keywords = [
-        "npm run dev", "npm start", "vite", "next dev", "ng serve",
-        "gatsby develop", "nodemon", "uvicorn", "gunicorn", "flask run",
-        "python -m http.server"
-    ]
-    command_lower = command.lower()
-    auto_bg = any(kw in command_lower for kw in bg_keywords)
-    should_run_bg = is_background or auto_bg
+    should_run_bg = _should_run_background(command, is_background)
 
     env = _build_bash_env()
     creationflags = 0
@@ -510,6 +621,101 @@ async def execute_bash(
             return await asyncio.to_thread(
                 _run_bash_blocking,
                 command,
+                timeout,
+                should_run_bg,
+                env,
+                creationflags,
+            )
+        except Exception as exc:
+            return _format_bash_error(exc)
+    except Exception as e:
+        return _format_bash_error(e)
+
+
+_BASH_BG_KEYWORDS = [
+    "npm run dev", "npm start", "vite", "next dev", "ng serve",
+    "gatsby develop", "nodemon", "uvicorn", "gunicorn", "flask run",
+    "python -m http.server",
+]
+
+
+def _should_run_background(command: str, is_background: bool) -> bool:
+    command_lower = command.lower()
+    auto_bg = any(kw in command_lower for kw in _BASH_BG_KEYWORDS)
+    return is_background or auto_bg
+
+
+def _resolve_docker_container(container: Optional[str] = None) -> Optional[str]:
+    raw = (container or "").strip()
+    if raw:
+        return raw
+    for key in ("PI_SDK_DOCKER_CONTAINER", "DOCKER_CONTAINER"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _build_docker_exec_argv(
+    command: str,
+    container: str,
+    workdir: Optional[str] = None,
+    user: Optional[str] = None,
+) -> List[str]:
+    argv = ["docker", "exec", "-i"]
+    wd = (workdir or "").strip()
+    if wd:
+        argv.extend(["-w", wd])
+    u = (user or "").strip()
+    if u:
+        argv.extend(["-u", u])
+    argv.extend([container, "bash", "-lc", command])
+    return argv
+
+
+async def execute_docker_bash(
+    command: str,
+    container: Optional[str] = None,
+    workdir: Optional[str] = None,
+    user: Optional[str] = None,
+    timeout: int = 30,
+    is_background: bool = False,
+) -> str:
+    """
+    Executes a bash command inside a running Docker container via ``docker exec``.
+
+    Container resolution order: ``container`` argument, then ``PI_SDK_DOCKER_CONTAINER``,
+    then ``DOCKER_CONTAINER``. Requires Docker CLI on the host and a running container.
+    """
+    resolved_container = _resolve_docker_container(container)
+    if not resolved_container:
+        return (
+            "Error: Docker container not specified. "
+            "Pass container= or set PI_SDK_DOCKER_CONTAINER / DOCKER_CONTAINER."
+        )
+
+    should_run_bg = _should_run_background(command, is_background)
+    env = _build_bash_env()
+    creationflags = 0
+    if sys.platform == "win32" and should_run_bg:
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    argv = _build_docker_exec_argv(
+        command,
+        resolved_container,
+        workdir=workdir,
+        user=user,
+    )
+
+    try:
+        return await _execute_subprocess_argv(
+            argv, timeout, should_run_bg, env, creationflags
+        )
+    except NotImplementedError:
+        try:
+            return await asyncio.to_thread(
+                _run_subprocess_argv_blocking,
+                argv,
                 timeout,
                 should_run_bg,
                 env,
@@ -748,7 +954,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run shell/bash commands (ls, git, pytest, grep, find, npm, etc.). Non-blocking for background/dev server commands.",
+            "description": "Run shell/bash commands on the host (ls, git, pytest, grep, find, npm, etc.). Non-blocking for background/dev server commands.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -763,6 +969,49 @@ TOOLS = [
                     "is_background": {
                         "type": "boolean",
                         "description": "Set to true for long-running background tasks or dev servers (e.g., npm run dev)."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "docker_bash",
+            "description": (
+                "Run shell/bash commands inside a running Docker container via docker exec. "
+                "Use for project commands that must run in the container environment (pytest, npm, migrations, etc.)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Bash command string to execute inside the container."
+                    },
+                    "container": {
+                        "type": "string",
+                        "description": (
+                            "Docker container name or ID. "
+                            "Defaults to PI_SDK_DOCKER_CONTAINER or DOCKER_CONTAINER env var."
+                        )
+                    },
+                    "workdir": {
+                        "type": "string",
+                        "description": "Working directory inside the container (docker exec -w)."
+                    },
+                    "user": {
+                        "type": "string",
+                        "description": "User to run as inside the container (docker exec -u)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum time in seconds to wait for command completion (default: 30)."
+                    },
+                    "is_background": {
+                        "type": "boolean",
+                        "description": "Set to true for long-running background tasks or dev servers."
                     }
                 },
                 "required": ["command"]
