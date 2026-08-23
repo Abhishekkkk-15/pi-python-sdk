@@ -162,6 +162,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `default_tools` | `bool` | `True` | Register builtin tools |
 | `enable_tools` | `list[str]` | `None` | Allowlist of builtin names |
 | `disable_tools` | `list[str]` | `[]` | Denylist of builtin names |
+| `docker_container` | `str` | `None` | Default container for `docker_bash` (per agent/user) |
 | `tavily_api_key` | `str` | `TAVILY_API_KEY` | Enables `web_search` |
 | `autonomous` | `bool` | `True` | Skip permission checks |
 | `permission_callback` | `callable` | `None` | `(tool, target, details) -> bool` |
@@ -335,8 +336,22 @@ Use `docker_bash` when project commands must run inside a container (tests, pack
 Container resolution order:
 
 1. `container` argument on the tool call
-2. `PI_SDK_DOCKER_CONTAINER` env var
-3. `DOCKER_CONTAINER` env var
+2. `Agent.create(docker_container=...)` — **recommended for cloud / multi-tenant**
+3. `PI_SDK_DOCKER_CONTAINER` env var (local dev fallback)
+4. `DOCKER_CONTAINER` env var
+
+```python
+# Cloud: one agent (or worker invocation) per user container
+agent = Agent.create(
+    api_key="...",
+    cwd=f"/data/users/{user_id}/workspace",
+    docker_container=user_container_id,
+    disable_tools=["bash"],
+    autonomous=True,
+)
+```
+
+Local dev can still use env:
 
 ```bash
 export PI_SDK_DOCKER_CONTAINER=my-app
@@ -348,6 +363,7 @@ Typical setup for container-only workflows:
 agent = Agent.create(
     api_key="...",
     cwd="/workspace/proj",
+    docker_container="my-app",
     disable_tools=["bash"],          # host shell off
     # docker_bash stays enabled (default)
 )

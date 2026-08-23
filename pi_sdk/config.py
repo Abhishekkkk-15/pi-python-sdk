@@ -139,6 +139,7 @@ class AgentOptions:
     default_tools: bool = True
     enable_tools: Optional[list[str]] = None
     disable_tools: list[str] = field(default_factory=list)
+    docker_container: Optional[str] = None
 
 
 @dataclass
@@ -174,6 +175,7 @@ class Config:
     default_tools: bool = True
     enable_tools: Optional[list[str]] = None
     disable_tools: list[str] = field(default_factory=list)
+    docker_container: Optional[str] = None
 
     @classmethod
     def from_options(cls, options: AgentOptions | None = None, **kwargs: Any) -> "Config":
@@ -248,6 +250,7 @@ class Config:
                 else None
             ),
             disable_tools=list(getattr(opts, "disable_tools", None) or []),
+            docker_container=getattr(opts, "docker_container", None),
         )
 
     def rotate_api_key(self) -> bool:

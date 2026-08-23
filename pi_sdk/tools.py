@@ -645,10 +645,16 @@ def _should_run_background(command: str, is_background: bool) -> bool:
     return is_background or auto_bg
 
 
-def _resolve_docker_container(container: Optional[str] = None) -> Optional[str]:
+def _resolve_docker_container(
+    container: Optional[str] = None,
+    default_container: Optional[str] = None,
+) -> Optional[str]:
     raw = (container or "").strip()
     if raw:
         return raw
+    default = (default_container or "").strip()
+    if default:
+        return default
     for key in ("PI_SDK_DOCKER_CONTAINER", "DOCKER_CONTAINER"):
         val = (os.environ.get(key) or "").strip()
         if val:
@@ -680,18 +686,24 @@ async def execute_docker_bash(
     user: Optional[str] = None,
     timeout: int = 30,
     is_background: bool = False,
+    default_container: Optional[str] = None,
 ) -> str:
     """
     Executes a bash command inside a running Docker container via ``docker exec``.
 
-    Container resolution order: ``container`` argument, then ``PI_SDK_DOCKER_CONTAINER``,
-    then ``DOCKER_CONTAINER``. Requires Docker CLI on the host and a running container.
+    Container resolution order: ``container`` argument, then ``default_container``
+    (typically from ``Agent.create(docker_container=...)``), then
+    ``PI_SDK_DOCKER_CONTAINER``, then ``DOCKER_CONTAINER``.
+    Requires Docker CLI on the host and a running container.
     """
-    resolved_container = _resolve_docker_container(container)
+    resolved_container = _resolve_docker_container(
+        container, default_container=default_container
+    )
     if not resolved_container:
         return (
             "Error: Docker container not specified. "
-            "Pass container= or set PI_SDK_DOCKER_CONTAINER / DOCKER_CONTAINER."
+            "Pass container=, set Agent.create(docker_container=...), "
+            "or set PI_SDK_DOCKER_CONTAINER / DOCKER_CONTAINER."
         )
 
     should_run_bg = _should_run_background(command, is_background)
@@ -994,7 +1006,8 @@ TOOLS = [
                         "type": "string",
                         "description": (
                             "Docker container name or ID. "
-                            "Defaults to PI_SDK_DOCKER_CONTAINER or DOCKER_CONTAINER env var."
+                            "Defaults to Agent.create(docker_container=...), then "
+                            "PI_SDK_DOCKER_CONTAINER or DOCKER_CONTAINER env var."
                         )
                     },
                     "workdir": {

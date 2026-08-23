@@ -206,6 +206,7 @@ class Agent:
             default_tools=bool(getattr(config, "default_tools", True)),
             enable_tools=getattr(config, "enable_tools", None),
             disable_tools=getattr(config, "disable_tools", None) or None,
+            docker_container=getattr(config, "docker_container", None),
         )
         for spec in coalesce_extra_tools(getattr(config, "extra_tools", None)):
             self.tools.add_spec(spec, replace=True)
@@ -248,6 +249,7 @@ class Agent:
         default_tools: bool = True,
         enable_tools: list[str] | None = None,
         disable_tools: list[str] | None = None,
+        docker_container: str | None = None,
         base_prompt: str | None = None,
         **kwargs: Any,
     ) -> "Agent":
@@ -290,6 +292,7 @@ class Agent:
             default_tools=default_tools,
             enable_tools=list(enable_tools) if enable_tools is not None else None,
             disable_tools=list(disable_tools or []),
+            docker_container=docker_container,
             base_prompt=base_prompt,
             **{
                 k: v

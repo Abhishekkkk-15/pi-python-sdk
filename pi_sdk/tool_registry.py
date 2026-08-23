@@ -211,6 +211,7 @@ def build_builtin_registry(
     enable_tools: Sequence[str] | None = None,
     disable_tools: Sequence[str] | None = None,
     default_tools: bool = True,
+    docker_container: str | None = None,
 ) -> ToolRegistry:
     """
     Register default PI coding tools.
@@ -248,6 +249,7 @@ def build_builtin_registry(
             user=user,
             timeout=timeout,
             is_background=is_background,
+            default_container=docker_container,
         ),
         "web_search": lambda query, max_results=5, **_: execute_web_search(
             query, max_results=max_results

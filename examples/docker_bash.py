@@ -3,12 +3,13 @@ Run commands inside a Docker container with the docker_bash tool.
 
 Setup:
   export LLM_KEY=your_mistral_api_key
-  export PI_SDK_DOCKER_CONTAINER=my-app   # container name or ID
 
 Run (from sdk/):
-  python examples/docker_bash.py
-  python examples/docker_bash.py my-app-container
-  python examples/docker_bash.py my-app-container "Show pwd and list files in /app"
+  python examples/docker_bash.py <container-name-or-id>
+  python examples/docker_bash.py my-app "Show pwd and list files in /app"
+
+The container is passed to Agent.create(docker_container=...) — the recommended
+approach for cloud workers where each user has their own container.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ async def main() -> int:
     container = _resolve_container(sys.argv)
     if not container:
         print(
-            "Set PI_SDK_DOCKER_CONTAINER / DOCKER_CONTAINER or pass container name:\n"
+            "Pass a running container name or ID:\n"
             "  python examples/docker_bash.py <container>",
             file=sys.stderr,
         )
@@ -90,6 +91,7 @@ async def main() -> int:
         cwd=os.getcwd(),
         autonomous=True,
         disable_tools=["bash"],
+        docker_container=container,
         on_event=on_event,
     )
 
