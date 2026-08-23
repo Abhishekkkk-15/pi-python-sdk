@@ -43,6 +43,14 @@ class AuthenticationError(AgentError):
     """Missing or invalid API credentials."""
 
 
+class RateLimitError(AgentError):
+    """LLM rate limit (HTTP 429) after retries were exhausted."""
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class PermissionDenied(AgentError):
     """Tool execution was denied by the permission policy."""
 
@@ -231,7 +239,6 @@ class Agent:
         cls,
         *,
         api_key: str | None = None,
-        api_keys: list[str] | None = None,
         provider: str = "mistral",
         model: str | None = None,
         base_url: str | None = None,
@@ -252,6 +259,8 @@ class Agent:
         disable_tools: list[str] | None = None,
         docker_container: str | None = None,
         docker_workdir: str | None = None,
+        max_retries: int = 3,
+        retry_on_rate_limit: bool = True,
         base_prompt: str | None = None,
         **kwargs: Any,
     ) -> "Agent":
@@ -276,7 +285,6 @@ class Agent:
         """
         options = AgentOptions(
             api_key=api_key,
-            api_keys=list(api_keys or []),
             provider=provider,
             model=model,
             base_url=base_url,
@@ -296,6 +304,8 @@ class Agent:
             disable_tools=list(disable_tools or []),
             docker_container=docker_container,
             docker_workdir=docker_workdir,
+            max_retries=max_retries,
+            retry_on_rate_limit=retry_on_rate_limit,
             base_prompt=base_prompt,
             **{
                 k: v
@@ -513,6 +523,9 @@ class Agent:
                 session_id=result.session_id,
             )
             return result
+        except RateLimitError:
+            await self._emitter.emit(EventType.RUN_FAILED, error="Rate limit exceeded")
+            raise
         except Exception as exc:
             await self._emitter.emit(EventType.RUN_FAILED, error=str(exc))
             session = self.memory.session
@@ -832,9 +845,17 @@ class Agent:
         use_tools: bool = True,
         stream: bool = True,
     ) -> Any:
-        from pi_sdk.tokenizer import count_messages
+        import asyncio
+
+        from pi_sdk.retry import (
+            is_rate_limit_error,
+            is_retryable_error,
+            retry_after_seconds,
+        )
 
         def _estimate_usage(msgs: list[dict], completion_text: str):
+            from pi_sdk.tokenizer import count_messages
+
             msg_objs = [
                 Message(
                     role=Role.from_val(m.get("role")),
@@ -883,21 +904,41 @@ class Agent:
             except Exception as exc:
                 return None, exc
 
-        response, error = await _run_once()
-        if error is None:
-            return response
+        max_attempts = 1
+        if self.config.retry_on_rate_limit:
+            max_attempts = 1 + max(0, int(self.config.max_retries))
 
-        if self.llm and self.llm.is_rate_limit(error) and self.config.rotate_api_key():
-            self.llm = self._create_provider()
-            await self._emitter.emit(
-                EventType.STATUS,
-                message="Rotated API key after rate limit; retrying...",
-            )
+        last_error: BaseException | None = None
+        for attempt in range(max_attempts):
             response, error = await _run_once()
             if error is None:
                 return response
 
-        raise error  # type: ignore[misc]
+            last_error = error
+            if not self.config.retry_on_rate_limit or not is_retryable_error(error):
+                raise error
+
+            if attempt >= max_attempts - 1:
+                if is_rate_limit_error(error):
+                    raise RateLimitError(
+                        str(error),
+                        retry_after=retry_after_seconds(error, attempt),
+                    ) from error
+                raise error
+
+            delay = retry_after_seconds(error, attempt)
+            await self._emitter.emit(
+                EventType.STATUS,
+                message=(
+                    f"Rate limited; retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 2}/{max_attempts})..."
+                ),
+            )
+            await asyncio.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Completion failed without an error")
 
     async def _ensure_session(self, user_query: str) -> Session:
         if self.memory.session is not None:
@@ -1106,6 +1147,7 @@ __all__ = [
     "Agent",
     "AgentError",
     "AuthenticationError",
+    "RateLimitError",
     "PermissionDenied",
     "PermissionDecision",
     "RunResult",

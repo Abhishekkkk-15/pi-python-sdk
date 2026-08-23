@@ -5,6 +5,7 @@ from pi_sdk.agent import (
     AgentError,
     AuthenticationError,
     PermissionDenied,
+    RateLimitError,
     RunResult,
     UsageSummary,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "AgentEvent",
     "AgentOptions",
     "AuthenticationError",
+    "RateLimitError",
     "BUILTIN_PROVIDERS",
     "BUILTIN_TOOL_NAMES",
     "Config",

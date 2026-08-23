@@ -101,16 +101,3 @@ class LLMProvider(ABC):
     @abstractmethod
     def list_models(self) -> list[ModelInfo]:
         """List models this backend exposes."""
-
-    def is_rate_limit(self, exc: BaseException) -> bool:
-        name = type(exc).__name__
-        if "RateLimit" in name:
-            return True
-        status = getattr(exc, "status_code", None)
-        if status == 429:
-            return True
-        resp = getattr(exc, "response", None)
-        if resp is not None and getattr(resp, "status_code", None) == 429:
-            return True
-        msg = str(exc).lower()
-        return "rate limit" in msg or "429" in msg

@@ -108,7 +108,6 @@ class AgentOptions:
     """Options for Agent.create(...)."""
 
     api_key: Optional[str] = None
-    api_keys: list[str] = field(default_factory=list)
     provider: str = "mistral"
     model: Optional[str] = None
     base_url: Optional[str] = None
@@ -141,13 +140,13 @@ class AgentOptions:
     disable_tools: list[str] = field(default_factory=list)
     docker_container: Optional[str] = None
     docker_workdir: Optional[str] = None
+    max_retries: int = 3
+    retry_on_rate_limit: bool = True
 
 
 @dataclass
 class Config:
     api_key: Optional[str] = None
-    api_keys: list[str] = field(default_factory=list)
-    active_key_index: int = 0
     provider: str = "mistral"
     model: str = "mistral-large-latest"
     base_url: str = BUILTIN_PROVIDERS["mistral"]["base_url"]
@@ -178,6 +177,8 @@ class Config:
     disable_tools: list[str] = field(default_factory=list)
     docker_container: Optional[str] = None
     docker_workdir: Optional[str] = None
+    max_retries: int = 3
+    retry_on_rate_limit: bool = True
 
     @classmethod
     def from_options(cls, options: AgentOptions | None = None, **kwargs: Any) -> "Config":
@@ -190,14 +191,13 @@ class Config:
         provider = (opts.provider or os.getenv("LLM_PROVIDER") or "mistral").lower()
         builtin = BUILTIN_PROVIDERS.get(provider, {})
 
-        keys = [k.strip() for k in (opts.api_keys or []) if k and str(k).strip()]
+        api_key: str | None = None
         if opts.api_key and str(opts.api_key).strip():
-            primary = str(opts.api_key).strip()
-            if primary not in keys:
-                keys.insert(0, primary)
-        env_key = (os.getenv("LLM_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
-        if env_key and env_key not in keys:
-            keys.append(env_key)
+            api_key = str(opts.api_key).strip()
+        else:
+            env_key = (os.getenv("LLM_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+            if env_key:
+                api_key = env_key
 
         model = (
             opts.model
@@ -217,9 +217,7 @@ class Config:
                 reasoning = None
 
         return cls(
-            api_key=keys[0] if keys else None,
-            api_keys=keys,
-            active_key_index=0,
+            api_key=api_key,
             provider=provider,
             model=str(model),
             base_url=str(base_url),
@@ -254,16 +252,6 @@ class Config:
             disable_tools=list(getattr(opts, "disable_tools", None) or []),
             docker_container=getattr(opts, "docker_container", None),
             docker_workdir=getattr(opts, "docker_workdir", None),
+            max_retries=max(0, int(getattr(opts, "max_retries", 3) or 0)),
+            retry_on_rate_limit=bool(getattr(opts, "retry_on_rate_limit", True)),
         )
-
-    def rotate_api_key(self) -> bool:
-        """Advance to the next configured API key. Returns True if rotated."""
-        if len(self.api_keys) < 2:
-            return False
-        self.active_key_index = (self.active_key_index + 1) % len(self.api_keys)
-        self.api_key = self.api_keys[self.active_key_index]
-        return True
-
-    @property
-    def key_count(self) -> int:
-        return len(self.api_keys)

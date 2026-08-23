@@ -509,12 +509,3 @@ class VertexAIProvider(LLMProvider):
             for mid in DEFAULT_MODELS:
                 results.append(ModelInfo(id=mid))
         return results
-
-    def is_rate_limit(self, exc: BaseException) -> bool:
-        if super().is_rate_limit(exc):
-            return True
-        name = type(exc).__name__
-        if "ResourceExhausted" in name or "TooManyRequests" in name:
-            return True
-        msg = str(exc).lower()
-        return "resource exhausted" in msg or ("quota" in msg and "exceed" in msg)

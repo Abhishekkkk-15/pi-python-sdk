@@ -146,8 +146,9 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `api_key` | `str` | env `LLM_KEY` / `OPENAI_API_KEY` | Primary provider key |
-| `api_keys` | `list[str]` | `[]` | Primary + secondary; rotates on 429 |
+| `api_key` | `str` | env `LLM_KEY` / `OPENAI_API_KEY` | Provider API key |
+| `max_retries` | `int` | `3` | Retries on HTTP 429/503 when `retry_on_rate_limit=True` |
+| `retry_on_rate_limit` | `bool` | `True` | Backoff and retry transient rate limits |
 | `provider` | `str` | `"mistral"` | `mistral`, `openai`, `groq`, `vertex`, or custom name |
 | `model` | `str` | provider default | Model id |
 | `base_url` | `str` | builtin | OpenAI-compatible endpoint (or Vertex location) |
@@ -265,7 +266,7 @@ async for event in agent.stream("Explain agent.py"):
 | `COMPACTION` | Context summarized | `message` |
 | `USAGE` | Token totals updated | token fields |
 | `ERROR` | Failure | `error` |
-| `STATUS` | Soft status (e.g. key rotate) | `message` |
+| `STATUS` | Soft status (e.g. rate-limit retry) | `message` |
 | `RUN_COMPLETED` / `RUN_FAILED` | Turn end | `text` / `error`, `session_id` |
 
 `event.text` is a shortcut for `data["text"]` or `data["content"]`.
@@ -485,8 +486,24 @@ Agent.create(
     model="my-model",
 )
 
-# Dual keys — automatic retry on HTTP 429
-Agent.create(api_key="primary", api_keys=["primary", "secondary"], provider="mistral")
+# Retry on rate limit (429/503) with exponential backoff
+Agent.create(
+    api_key="...",
+    provider="mistral",
+    max_retries=3,
+    retry_on_rate_limit=True,
+)
+```
+
+On repeated 429s after retries are exhausted, the SDK raises `RateLimitError` with an optional `retry_after` hint (seconds). Catch it in your API layer to return HTTP 429 to clients or queue the job:
+
+```python
+from pi_sdk import Agent, RateLimitError
+
+try:
+    result = await agent.run(prompt)
+except RateLimitError as e:
+    return {"status": "rate_limited", "retry_after": e.retry_after}
 ```
 
 ---
@@ -593,6 +610,7 @@ from pi_sdk import (
     Agent,
     AgentError,
     AuthenticationError,
+    RateLimitError,
     AgentEvent,
     AgentOptions,
     Config,
@@ -618,6 +636,7 @@ from pi_sdk import (
 | Exception | When |
 |-----------|------|
 | `AuthenticationError` | No API key (non-Vertex) at `create` |
+| `RateLimitError` | HTTP 429 after retries exhausted; see `.retry_after` |
 | `AgentError` | e.g. `resume` with unknown `session_id` |
 | `RunResult.status == "error"` | Turn failed; see `result.error` |
 
