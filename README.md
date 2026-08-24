@@ -136,6 +136,45 @@ await agent2.resume(result.session_id)
 Collections: `sessions` (`_id` = session id) and `messages` (`session_id` + `seq`).  
 Workspace **files** stay on the filesystem (`cwd`); Mongo only holds conversation state.
 
+#### MongoDB schema
+
+Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`; unique `(session_id, seq)` on `messages`.
+
+**`sessions`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_id` | `string` | Session id |
+| `title` | `string` | Session title |
+| `workspace` | `string` | Host workspace path (`cwd`) |
+| `permissions` | `object` | `{ allow_all, allowed_tools, allowed_targets }` |
+| `prompt_tokens` | `int` | Cumulative prompt tokens |
+| `completion_tokens` | `int` | Cumulative completion tokens |
+| `total_tokens` | `int` | Cumulative total tokens |
+| `cached_tokens` | `int` | Cached token count |
+| `estimated_cost_usd` | `float` | Estimated cost |
+| `compaction_summary` | `string` | Summary of compacted message prefix |
+| `compacted_until` | `int` | Message index compacted through |
+| `user_id` | `string \| null` | Optional tenant scope |
+| `created_at` | `string` | ISO-8601 UTC |
+| `updated_at` | `string` | ISO-8601 UTC |
+
+**`messages`**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | `string` | Parent session id |
+| `seq` | `int` | Order within session (0-based) |
+| `role` | `string` | `user` / `system` / `tool` / `assistant` |
+| `content` | `string` | Message text |
+| `user_id` | `string \| null` | Copied from session when set |
+| `name` | `string` | Optional (e.g. tool name) |
+| `tool_calls` | `any` | Optional assistant tool calls |
+| `tool_call_id` | `string` | Optional tool-result id |
+| `reasoning_content` | `string` | Optional model reasoning |
+
+Optional message fields are omitted when `null`. Docker sandbox settings (`docker_container`, `docker_workdir`, volume mounts) are **not** stored — pass them again on `Agent.create` (or via env).
+
 You can also inject a custom store: `Agent.create(store=my_store, ...)`.
 
 The **workspace** (`cwd`) is the project the tools edit — independent of session storage.
