@@ -74,6 +74,7 @@ def _session_to_doc(session: Session) -> dict:
         "compaction_summary": session.compaction_summary or "",
         "compacted_until": int(session.compacted_until or 0),
         "user_id": session.user_id,
+        "workspace_id": session.workspace_id,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
@@ -101,6 +102,7 @@ def _doc_to_session(data: dict) -> Session:
         compaction_summary=str(data.get("compaction_summary", "") or ""),
         compacted_until=int(data.get("compacted_until", 0) or 0),
         user_id=data.get("user_id"),
+        workspace_id=data.get("workspace_id"),
         created_at=data.get("created_at"),
         updated_at=data.get("updated_at"),
     )
@@ -129,6 +131,7 @@ class MongoSessionStore(SessionStore):
         if self._indexes_ready:
             return
         await self._sessions.create_index("user_id")
+        await self._sessions.create_index("workspace_id")
         await self._messages.create_index(
             [("session_id", self._ascending), ("seq", self._ascending)], unique=True
         )
@@ -140,6 +143,7 @@ class MongoSessionStore(SessionStore):
         title: str,
         workspace: Path,
         user_id: str | None = None,
+        workspace_id: str | None = None,
         permissions: dict | None = None,
     ) -> Session:
         await self._ensure_indexes()
@@ -157,6 +161,7 @@ class MongoSessionStore(SessionStore):
                 "allowed_targets": {},
             },
             user_id=user_id,
+            workspace_id=workspace_id,
             created_at=now,
             updated_at=now,
         )

@@ -125,20 +125,24 @@ agent = Agent.create(
     mongodb_uri="mongodb://localhost:27017",  # or PI_SDK_MONGODB_URI / MONGODB_URI
     mongodb_db="pi_sdk",
     user_id="user_42",   # optional tenant scope for list/resume
+    workspace_id="ws_abc",  # optional link to your Workspace entity
     cwd="/workspace/proj",
 )
 result = await agent.run("...")
 # later:
 agent2 = Agent.create(..., storage="mongodb", mongodb_uri="...", user_id="user_42")
 await agent2.resume(result.session_id)
+# update link after create / resume:
+await agent2.set_workspace_id("ws_abc")
 ```
 
 Collections: `sessions` (`_id` = session id) and `messages` (`session_id` + `seq`).  
-Workspace **files** stay on the filesystem (`cwd`); Mongo only holds conversation state.
+Workspace **files** stay on the filesystem (`cwd`); Mongo only holds conversation state.  
+`workspace` is the host path; `workspace_id` is your app's Workspace document id (optional).
 
 #### MongoDB schema
 
-Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`; unique `(session_id, seq)` on `messages`.
+Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`, `sessions.workspace_id`; unique `(session_id, seq)` on `messages`.
 
 **`sessions`**
 
@@ -147,6 +151,7 @@ Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`; unique `
 | `_id` | `string` | Session id |
 | `title` | `string` | Session title |
 | `workspace` | `string` | Host workspace path (`cwd`) |
+| `workspace_id` | `string \| null` | App-owned Workspace entity id |
 | `permissions` | `object` | `{ allow_all, allowed_tools, allowed_targets }` |
 | `prompt_tokens` | `int` | Cumulative prompt tokens |
 | `completion_tokens` | `int` | Cumulative completion tokens |
@@ -219,6 +224,7 @@ class MongoSessionDocument(BaseModel):
     compaction_summary: str = ""
     compacted_until: int = 0
     user_id: str | None = None
+    workspace_id: str | None = None  # your Workspace entity id
     created_at: str | None = None  # ISO-8601 UTC
     updated_at: str | None = None  # ISO-8601 UTC
 
@@ -269,6 +275,7 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `mongodb_uri` | `str` | `PI_SDK_MONGODB_URI` / `MONGODB_URI` | Mongo connection string |
 | `mongodb_db` | `str` | `"pi_sdk"` | Mongo database name |
 | `user_id` | `str` | `None` | Tenant scope for create/list/resume |
+| `workspace_id` | `str` | `None` | App-owned workspace entity id stored on the session |
 | `store` | `SessionStore` | `None` | Inject custom store (wins over `storage`) |
 | `extra_tools` | `list` | `[]` | `ToolSpec` / dicts registered at create |
 | `default_tools` | `bool` | `True` | Register builtin tools |

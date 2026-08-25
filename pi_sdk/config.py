@@ -131,6 +131,7 @@ class AgentOptions:
     mongodb_uri: Optional[str] = None
     mongodb_db: str = "pi_sdk"
     user_id: Optional[str] = None
+    workspace_id: Optional[str] = None
     # Injected SessionStore instance (not serialized); set via Agent.create(store=...)
     store: Any = None
     extra_tools: list[Any] = field(default_factory=list)
@@ -170,6 +171,7 @@ class Config:
     mongodb_uri: Optional[str] = None
     mongodb_db: str = "pi_sdk"
     user_id: Optional[str] = None
+    workspace_id: Optional[str] = None
     store: Any = None
     extra_tools: list[Any] = field(default_factory=list)
     default_tools: bool = True
@@ -241,6 +243,7 @@ class Config:
             mongodb_uri=getattr(opts, "mongodb_uri", None),
             mongodb_db=str(getattr(opts, "mongodb_db", None) or "pi_sdk"),
             user_id=getattr(opts, "user_id", None),
+            workspace_id=getattr(opts, "workspace_id", None),
             store=getattr(opts, "store", None),
             extra_tools=list(getattr(opts, "extra_tools", None) or []),
             default_tools=bool(getattr(opts, "default_tools", True)),

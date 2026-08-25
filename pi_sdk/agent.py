@@ -208,7 +208,11 @@ class Agent:
             mongodb_db=config.mongodb_db or "pi_sdk",
             store=config.store,
         )
-        self.memory = Memory(store=store, user_id=config.user_id)
+        self.memory = Memory(
+            store=store,
+            user_id=config.user_id,
+            workspace_id=getattr(config, "workspace_id", None),
+        )
         self.llm: LLMProvider | None = self._create_provider()
         self.tools: ToolRegistry = build_builtin_registry(
             default_tools=bool(getattr(config, "default_tools", True)),
@@ -252,6 +256,7 @@ class Agent:
         mongodb_uri: str | None = None,
         mongodb_db: str = "pi_sdk",
         user_id: str | None = None,
+        workspace_id: str | None = None,
         store: Any = None,
         extra_tools: list[Any] | None = None,
         default_tools: bool = True,
@@ -297,6 +302,7 @@ class Agent:
             mongodb_uri=mongodb_uri,
             mongodb_db=mongodb_db,
             user_id=user_id,
+            workspace_id=workspace_id,
             store=store,
             extra_tools=list(extra_tools or []),
             default_tools=default_tools,
@@ -579,9 +585,27 @@ class Agent:
         set_workspace(session.workspace)
         self.memory.session = session
         self.current_session = session
+        # Keep Memory default in sync so new sessions from this agent reuse it
+        if session.workspace_id is not None:
+            self.memory.workspace_id = session.workspace_id
         sys_prompt = self._build_system_prompt(cwd=str(session.workspace))
         await self.memory.load_session_chat(session, system_prompt=sys_prompt)
         return self
+
+    async def set_workspace_id(self, workspace_id: str | None) -> None:
+        """
+        Attach (or clear) an app-owned workspace id on the active session and persist it.
+
+        Also updates the default used for future ``new_session`` / first ``run`` creates.
+        """
+        self.memory.workspace_id = workspace_id
+        if self.config is not None:
+            self.config.workspace_id = workspace_id
+        session = self.memory.session
+        if session is None:
+            return
+        session.workspace_id = workspace_id
+        await self.memory.save_session()
 
     async def new_session(self, title: str = "session") -> Session:
         """Start a fresh session (keeps config / provider)."""

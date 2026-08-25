@@ -19,6 +19,7 @@ class SessionStore(ABC):
         title: str,
         workspace: Path,
         user_id: str | None = None,
+        workspace_id: str | None = None,
         permissions: dict | None = None,
     ) -> Session:
         ...

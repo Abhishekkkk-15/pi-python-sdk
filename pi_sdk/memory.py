@@ -27,9 +27,11 @@ class Memory:
         store: SessionStore | None = None,
         *,
         user_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> None:
         self.store: SessionStore = store or DiskSessionStore()
         self.user_id = user_id
+        self.workspace_id = workspace_id
         self.messages: list[Message] = []
         self.session: Session | None = None
 
@@ -49,6 +51,7 @@ class Memory:
             title=title,
             workspace=ws,
             user_id=self.user_id,
+            workspace_id=self.workspace_id,
         )
         self.session = session
         if initial_messages:

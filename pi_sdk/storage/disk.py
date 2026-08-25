@@ -121,6 +121,7 @@ def session_from_metadata(data: dict, folder: Path) -> Session:
         compaction_summary=str(data.get("compaction_summary", "") or ""),
         compacted_until=int(data.get("compacted_until", 0) or 0),
         user_id=data.get("user_id"),
+        workspace_id=data.get("workspace_id"),
         created_at=data.get("created_at"),
         updated_at=data.get("updated_at"),
     )
@@ -149,6 +150,7 @@ class DiskSessionStore(SessionStore):
         title: str,
         workspace: Path,
         user_id: str | None = None,
+        workspace_id: str | None = None,
         permissions: dict | None = None,
     ) -> Session:
         sid = generate_chat_id()
@@ -169,6 +171,7 @@ class DiskSessionStore(SessionStore):
                 "allowed_targets": {},
             },
             user_id=user_id,
+            workspace_id=workspace_id,
             created_at=now,
             updated_at=now,
         )

@@ -101,6 +101,8 @@ class Session:
     compaction_summary: str = ""
     compacted_until: int = 0
     user_id: str | None = None
+    # App-owned workspace entity id (not the filesystem path in `workspace`)
+    workspace_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
