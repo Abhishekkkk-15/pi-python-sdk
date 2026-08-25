@@ -175,6 +175,78 @@ Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`; unique `
 
 Optional message fields are omitted when `null`. Docker sandbox settings (`docker_container`, `docker_workdir`, volume mounts) are **not** stored — pass them again on `Agent.create` (or via env).
 
+#### Copy-paste Pydantic models
+
+Mirror of the documents the SDK writes (for your own API / admin tools — not required to use the SDK):
+
+```python
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class MessageRole(str, Enum):
+    USER = "user"
+    SYSTEM = "system"
+    TOOL = "tool"
+    ASSISTANT = "assistant"
+
+
+class SessionPermissions(BaseModel):
+    allow_all: bool = False
+    allowed_tools: list[str] = Field(default_factory=list)
+    # tool_name -> list of allowed target keys
+    allowed_targets: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class MongoSessionDocument(BaseModel):
+    """Collection: `sessions` — `_id` is the session id."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="_id")
+    title: str = ""
+    workspace: str  # host cwd path
+    permissions: SessionPermissions = Field(default_factory=SessionPermissions)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    compaction_summary: str = ""
+    compacted_until: int = 0
+    user_id: str | None = None
+    created_at: str | None = None  # ISO-8601 UTC
+    updated_at: str | None = None  # ISO-8601 UTC
+
+
+class MongoMessageDocument(BaseModel):
+    """Collection: `messages` — unique index on (session_id, seq)."""
+
+    session_id: str
+    seq: int  # 0-based order within the session
+    role: MessageRole | str
+    content: str = ""
+    user_id: str | None = None
+    name: str | None = None
+    tool_calls: list[Any] | None = None
+    tool_call_id: str | None = None
+    reasoning_content: str | None = None
+```
+
+Example: load a session doc from Motor:
+
+```python
+doc = await db.sessions.find_one({"_id": session_id})
+session = MongoSessionDocument.model_validate(doc)
+
+cursor = db.messages.find({"session_id": session_id}).sort("seq", 1)
+messages = [MongoMessageDocument.model_validate(m) async for m in cursor]
+```
+
 You can also inject a custom store: `Agent.create(store=my_store, ...)`.
 
 The **workspace** (`cwd`) is the project the tools edit — independent of session storage.
