@@ -155,9 +155,16 @@ class OpenAIProvider(LLMProvider):
         if max_tokens is not None:
             kwargs["max_output_tokens"] = max_tokens
         if reasoning_effort:
-            kwargs["reasoning"] = {"effort": reasoning_effort}
+            kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
 
-        stream = await self.client.responses.create(**kwargs)
+        try:
+            stream = await self.client.responses.create(**kwargs)
+        except Exception:
+            if isinstance(kwargs.get("reasoning"), dict) and "summary" in kwargs["reasoning"]:
+                kwargs["reasoning"] = {"effort": reasoning_effort}
+                stream = await self.client.responses.create(**kwargs)
+            else:
+                raise
         ui = _StreamUI(stream_handler)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
