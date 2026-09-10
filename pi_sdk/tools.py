@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
+from pi_sdk.paths import get_workspace
 
 
 SKIP_DIR_NAMES = {
@@ -74,12 +75,56 @@ DEFAULT_MAX_LINES = 1000
 DEFAULT_MAX_BYTES = 50 * 1024  # 50KB
 
 
+def _resolve_workspace_path(path: str | Path | None) -> Path:
+    """
+    Resolves a file path for workspace tools (read, write, edit, grep).
+    Handles:
+    - None or empty or '.' -> get_workspace()
+    - Container paths (e.g. '/app/src/App.tsx', '/app', '/workspace/...') -> maps to workspace root
+    - Unix-style root paths (e.g. '/src/App.tsx') -> maps to workspace root
+    - Relative paths (e.g. 'src/App.tsx') -> resolved against get_workspace()
+    - Absolute host paths (e.g. 'F:/study/.../src/App.tsx') -> preserved
+    """
+    if path is None or str(path).strip() in ("", "."):
+        return get_workspace()
+
+    raw = str(path).strip()
+    norm = raw.replace("\\", "/")
+
+    # 1. Exact '/app' or '/workspace' refers to the workspace root itself
+    if norm in ("/app", "/workspace", "app", "workspace"):
+        return get_workspace()
+
+    # 2. Container prefixes like '/app/...' or '/workspace/...'
+    for prefix in ("/app/", "/workspace/", "app/", "workspace/"):
+        if norm.startswith(prefix):
+            rel = norm[len(prefix):]
+            return (get_workspace() / rel).resolve()
+
+    # 3. Leading slash e.g. '/src/App.tsx' (excluding Windows drive letters like C:/)
+    if norm.startswith("/") and not (len(norm) > 2 and norm[1] == ":"):
+        rel = norm.lstrip("/")
+        return (get_workspace() / rel).resolve()
+
+    p = Path(raw)
+    # 4. If it's already an absolute path that exists or is under a drive root, check if valid
+    if p.is_absolute():
+        if p.exists():
+            return p
+        # If absolute on host, allow creating/writing new files under host absolute path
+        if len(raw) > 2 and raw[1] == ":":
+            return p
+
+    # 5. Standard relative path (e.g. 'package.json', 'src/App.tsx')
+    return (get_workspace() / p).resolve()
+
+
 async def execute_read(
     path: str, offset: Optional[int] = None, limit: Optional[int] = None
 ) -> str:
     """Reads and returns the contents of a text file, supporting offset and limit, with line formatting and truncation limits."""
     try:
-        filepath = Path(path)
+        filepath = _resolve_workspace_path(path)
         if not filepath.exists():
             return f"Error: File '{path}' does not exist."
         if not filepath.is_file():
@@ -151,7 +196,7 @@ async def execute_read(
 async def execute_write(path: str, content: str) -> str:
     """Creates or completely overwrites a file with the given content."""
     try:
-        filepath = Path(path)
+        filepath = _resolve_workspace_path(path)
         existed = filepath.exists() and filepath.is_file()
         # Create parent directories if they don't exist
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +217,7 @@ async def execute_edit(path: str, edits: List[Dict[str, str]]) -> str:
     All edits are matched against the original file state before any modifications occur.
     """
     try:
-        filepath = Path(path)
+        filepath = _resolve_workspace_path(path)
         if not filepath.exists():
             return f"Error: File '{path}' does not exist."
 
@@ -837,7 +882,7 @@ async def execute_grep(
     except re.error as e:
         return f"Error: invalid regex pattern: {e}"
 
-    root = Path(path or ".").expanduser()
+    root = _resolve_workspace_path(path)
     if not root.exists():
         return f"Error: path '{path}' does not exist."
 
@@ -886,7 +931,7 @@ async def execute_grep(
                 if regex.search(line):
                     rel = filepath
                     try:
-                        rel = filepath.resolve().relative_to(Path.cwd().resolve())
+                        rel = filepath.resolve().relative_to(get_workspace().resolve())
                     except Exception:
                         rel = filepath
                     matches.append(f"{rel}:{line_no}:{line.rstrip()}")

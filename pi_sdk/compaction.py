@@ -247,33 +247,11 @@ def find_keep_start_by_tokens(
         if accumulated >= keep_recent_tokens:
             break
 
-    # 2. Revised Turn Boundary Alignment:
-    while cutoff_idx > body_start:
-        curr_role = _role_str(messages[cutoff_idx].role)
-        curr_msg = messages[cutoff_idx]
-
-        # Case A: Cutoff is on a tool response ("tool" or "function")
-        if curr_role in ("tool", "function"):
-            cutoff_idx -= 1
-            continue
-
-        # Case B: Cutoff is on an assistant message with tool calls
-        if curr_role == "assistant" and getattr(curr_msg, "tool_calls", None):
-            prev_idx = cutoff_idx - 1
-            if prev_idx >= body_start and _role_str(messages[prev_idx].role) == "user":
-                cutoff_idx = prev_idx
-            else:
-                cutoff_idx -= 1
-            continue
-
-        # Case C: If we're on assistant message and previous message was assistant or tool
-        if curr_role == "assistant" and cutoff_idx > body_start:
-            prev_role = _role_str(messages[cutoff_idx - 1].role)
-            if prev_role in ("tool", "function", "assistant"):
-                cutoff_idx -= 1
-                continue
-
-        break
+    # 2. Turn Boundary Alignment:
+    # If cutoff landed inside tool results, walk back to the assistant turn that invoked them.
+    # Do not walk back past the assistant, as autonomous tool-chains have no intervening user turns.
+    while cutoff_idx > body_start and _role_str(messages[cutoff_idx].role) in ("tool", "function"):
+        cutoff_idx -= 1
 
     # 3. Ensure index >= 1 (never overwrite index 0, which is the SYSTEM prompt)
     return max(cutoff_idx, body_start)
