@@ -850,6 +850,7 @@ class Agent:
             await self._record_usage(response)
             summary = (response.choices[0].message.content or "").strip()
         except Exception as e:
+            await self._emitter.emit(EventType.ERROR, error=f"Compaction failed: {e}")
             return f"Compaction failed: {e}"
         if not summary:
             return "Summarizer returned empty text."
@@ -1002,7 +1003,9 @@ class Agent:
 
         while True:
             if self.config.compaction_enabled:
-                await self.run_compaction(force=False)
+                comp_res = await self.run_compaction(force=False)
+                if comp_res and not comp_res.startswith("Below threshold"):
+                    print(f"[Compaction] {comp_res}")
             api_messages = self._build_api_messages()
             try:
                 res = await self._create_completion(api_messages, use_tools=True, stream=True)
