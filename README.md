@@ -106,10 +106,9 @@ agent.reset_conversation()            # clear in-memory history
 
 ```
 ~/.pi-sdk/
-├── <session-id>/
-│   ├── metadata.json
-│   └── conversation_history.jsonl
-└── skills/
+└── <session-id>/
+    ├── metadata.json
+    └── conversation_history.jsonl
 ```
 
 **MongoDB (opt-in)** — session metadata + chat messages only (not workspace files):
@@ -293,11 +292,12 @@ The **workspace** (`cwd`) is the project the tools edit — independent of sessi
 | `max_tokens` | `int` | `None` | Completion cap |
 | `reasoning_effort` | `str` | `None` | `low` / `medium` / `high` |
 | `skill_names` | `list[str]` | `None` | Pin skills (skip auto-select) |
+| `skills_dirs` | `list[str]` | `None` | Extra shared skill roots (after project `.agents/skills`) |
 | `base_prompt` | `str` | `None` | Replace opening identity paragraph only (tools/guidelines unchanged) |
 | `system_prompt_extra` | `str` | `None` | Appended to system prompt |
 | `input_price_per_mtok` / `output_price_per_mtok` | `float` | `0` | Cost estimate inputs |
 
-Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`, `PI_SDK_DOCKER_CONTAINER`, `DOCKER_CONTAINER`, `PI_SDK_DOCKER_WORKDIR`, `DOCKER_WORKDIR`.
+Environment variables: `LLM_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `TAVILY_API_KEY`, `PI_SDK_DATA_DIR`, `PI_SDK_SKILLS_DIRS`, `PI_SDK_MONGODB_URI`, `MONGODB_URI`, `PI_SDK_BASH`, `PI_SDK_DOCKER_CONTAINER`, `DOCKER_CONTAINER`, `PI_SDK_DOCKER_WORKDIR`, `DOCKER_WORKDIR`.
 
 ### Custom identity (`base_prompt`)
 
@@ -628,17 +628,64 @@ except RateLimitError as e:
 
 ## Skills
 
-Markdown skills loaded from the workspace (first match wins):
+Skills are discovered in this order (first match wins):
 
-1. `<cwd>/.pi-sdk/skills/`
-2. `<cwd>/.pi-python/skills/`
-3. `<cwd>/skills/`
-4. `<data_dir>/skills/`
+1. **Project:** `<cwd>/.agents/skills/<name>/SKILL.md`
+2. **Shared (API):** `Agent.create(skills_dirs=["/opt/pi-skills", ...])`
+3. **Shared (env):** `PI_SDK_SKILLS_DIRS` (comma-separated and/or `os.pathsep`)
 
-Layouts: `skills/deploy/SKILL.md` or `skills/lint.md`.
+Optional siblings under a skill folder (`scripts/`, `references/`, `assets/`) stay on disk; when a skill is activated, the system prompt includes its **Path** so the agent can `read` / run them on demand. Flat `<name>.md` files under a skills root are also accepted.
+
+**Breaking:** older locations (`.pi-sdk/skills`, `.pi-python/skills`, `.pi/skills`, `<cwd>/skills`, `<data_dir>/skills`) are no longer scanned. Move project skills into `.agents/skills/`.
+
+`npx skills add -g` home dirs are **not** scanned unless you pass them via `skills_dirs` / `PI_SDK_SKILLS_DIRS`.
 
 - **Auto:** each turn, the model picks up to 3 relevant skills.
 - **Pinned:** `Agent.create(skill_names=["deploy", "lint"])` skips auto-select.
+
+### Shared defaults (cloud / templates)
+
+Mount platform skills once and point every agent at them; project skills still override the same name:
+
+```python
+agent = Agent.create(
+    api_key="...",
+    cwd="/data/user42/proj",          # has .agents/skills/ for overrides
+    skills_dirs=["/opt/pi-platform/skills"],
+)
+```
+
+```bash
+export PI_SDK_SKILLS_DIRS="/opt/pi-platform/skills,/opt/team-skills"
+```
+
+### Install with `npx skills add`
+
+Requires [Node.js](https://nodejs.org/) (`npx` on PATH). Installs into the **project** path by default:
+
+```bash
+npx skills add vercel-labs/agent-skills --skill frontend-design -a universal -y
+# → <cwd>/.agents/skills/frontend-design/
+```
+
+Same from Python:
+
+```python
+from pi_sdk import Agent, Skills
+
+await Skills.install(
+    "vercel-labs/agent-skills",
+    skill="frontend-design",   # or ["a", "b"]
+    # agent="universal" is the default
+)
+# Skills.refresh() runs automatically after a successful install
+```
+
+Then run the agent with `cwd` pointing at that project (or pin names):
+
+```python
+agent = Agent.create(api_key="...", cwd=".", skill_names=["frontend-design"])
+```
 
 ---
 

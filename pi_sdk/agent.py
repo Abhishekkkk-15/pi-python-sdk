@@ -213,6 +213,8 @@ class Agent:
             user_id=config.user_id,
             workspace_id=getattr(config, "workspace_id", None),
         )
+        # Shared/default skill roots (project .agents/skills still wins)
+        Skills.set_extra_dirs(getattr(config, "skills_dirs", None))
         self.llm: LLMProvider | None = self._create_provider()
         self.tools: ToolRegistry = build_builtin_registry(
             default_tools=bool(getattr(config, "default_tools", True)),
@@ -257,6 +259,7 @@ class Agent:
         mongodb_db: str = "pi_sdk",
         user_id: str | None = None,
         workspace_id: str | None = None,
+        skills_dirs: list[str] | None = None,
         store: Any = None,
         extra_tools: list[Any] | None = None,
         default_tools: bool = True,
@@ -303,6 +306,7 @@ class Agent:
             mongodb_db=mongodb_db,
             user_id=user_id,
             workspace_id=workspace_id,
+            skills_dirs=list(skills_dirs) if skills_dirs is not None else None,
             store=store,
             extra_tools=list(extra_tools or []),
             default_tools=default_tools,
@@ -327,6 +331,7 @@ class Agent:
                     "output_price_per_mtok",
                     "max_history_messages",
                     "skill_names",
+                    "skills_dirs",
                     "base_prompt",
                     "system_prompt_extra",
                 }

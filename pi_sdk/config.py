@@ -125,6 +125,7 @@ class AgentOptions:
     output_price_per_mtok: float = DEFAULT_OUTPUT_PRICE_PER_MTOK
     max_history_messages: int = DEFAULT_MAX_HISTORY_MESSAGES
     skill_names: Optional[list[str]] = None
+    skills_dirs: Optional[list[str]] = None
     base_prompt: Optional[str] = None
     system_prompt_extra: Optional[str] = None
     storage: str = "disk"
@@ -165,6 +166,7 @@ class Config:
     cwd: Optional[str] = None
     data_dir: Optional[str] = None
     skill_names: Optional[list[str]] = None
+    skills_dirs: Optional[list[str]] = None
     base_prompt: Optional[str] = None
     system_prompt_extra: Optional[str] = None
     storage: str = "disk"
@@ -237,6 +239,11 @@ class Config:
             cwd=opts.cwd,
             data_dir=opts.data_dir,
             skill_names=opts.skill_names,
+            skills_dirs=(
+                list(opts.skills_dirs)
+                if getattr(opts, "skills_dirs", None) is not None
+                else None
+            ),
             base_prompt=opts.base_prompt,
             system_prompt_extra=opts.system_prompt_extra,
             storage=str(getattr(opts, "storage", None) or "disk"),

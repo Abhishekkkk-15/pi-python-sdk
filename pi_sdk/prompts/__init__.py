@@ -132,9 +132,23 @@ class Prompt:
         # 5. Skills Section (if read tool is available)
         has_read = "read" in tools
         if has_read and active_skills:
-            prompt += "\n\n### Active Skills\n\nThe following specialized skills have been loaded for this task:\n"
+            from pi_sdk.skills import Skills
+
+            prompt += (
+                "\n\n### Active Skills\n\n"
+                "The following specialized skills have been loaded for this task.\n"
+                "Each skill lives under the Path below. Use read/bash (or docker_bash) "
+                "for relative files such as scripts/, references/, and assets/ under "
+                "that directory when the skill instructions say to.\n"
+            )
             for name, content in active_skills.items():
-                prompt += f"\n#### Skill: {name}\n{content}\n"
+                root = Skills.skill_root(name)
+                path_line = (
+                    f"\nPath: {root.as_posix()}\n"
+                    if root is not None
+                    else "\n"
+                )
+                prompt += f"\n#### Skill: {name}{path_line}{content}\n"
 
         # 6. Metadata Anchoring (Date + CWD at bottom)
         prompt += f"\n\nCurrent date: {date_str}"
