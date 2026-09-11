@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -53,6 +54,13 @@ class RateLimitError(AgentError):
 
 class PermissionDenied(AgentError):
     """Tool execution was denied by the permission policy."""
+
+
+class AbortError(AgentError):
+    """Active run was aborted via ``Agent.abort()``."""
+
+    def __init__(self, message: str = "Aborted by user") -> None:
+        super().__init__(message)
 
 
 KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
@@ -232,6 +240,7 @@ class Agent:
         self._pending_cached_tokens = 0
         self._emitter = EventEmitter()
         self.current_session: Session | None = None
+        self._abort_event = asyncio.Event()
 
         sys_prompt = self._build_system_prompt(cwd=str(get_workspace()))
         self.memory.messages = [Message(role=Role.SYSTEM, content=sys_prompt)]
@@ -484,8 +493,48 @@ class Agent:
         """Alias for run()."""
         return await self.run(prompt, collect_events=collect_events)
 
+    def abort(self) -> None:
+        """
+        Request cooperative cancellation of the active ``run`` / ``stream``.
+
+        Safe to call from another asyncio task (e.g. WebSocket abort handler).
+        The run stops at the next checkpoint (before/between LLM and tool steps).
+        An in-flight tool usually finishes; remaining tools in the batch are skipped.
+        """
+        self._abort_event.set()
+
+    def _clear_abort(self) -> None:
+        self._abort_event.clear()
+
+    def _raise_if_aborted(self) -> None:
+        if self._abort_event.is_set():
+            raise AbortError()
+
+    async def _append_aborted_tool_stubs(self, tools: list[Any]) -> None:
+        """Fill missing tool results so assistant tool_calls history stays valid."""
+        for tool in tools:
+            tool_name = getattr(getattr(tool, "function", None), "name", None) or "tool"
+            tool_id = getattr(tool, "id", None)
+            content = "Aborted by user"
+            await self._emitter.emit(
+                EventType.TOOL_RESULT,
+                name=tool_name,
+                content=content,
+                id=tool_id,
+                aborted=True,
+            )
+            await self._append_message(
+                Message(
+                    role=Role.TOOL,
+                    name=tool_name,
+                    content=content,
+                    tool_call_id=tool_id,
+                )
+            )
+
     async def run(self, prompt: str, *, collect_events: bool = False) -> RunResult:
         """Run one user turn to completion (tool loop included)."""
+        self._clear_abort()
         self._emitter.collect = collect_events
         self._emitter.drain()
         try:
@@ -534,6 +583,32 @@ class Agent:
                 session_id=result.session_id,
             )
             return result
+        except AbortError as exc:
+            session = self.memory.session
+            usage = UsageSummary()
+            if session:
+                usage = UsageSummary(
+                    prompt_tokens=session.prompt_tokens,
+                    completion_tokens=session.completion_tokens,
+                    total_tokens=session.total_tokens,
+                    cached_tokens=session.cached_tokens,
+                    estimated_cost_usd=session.estimated_cost_usd,
+                )
+            result = RunResult(
+                status="cancelled",
+                text="",
+                session_id=session.id if session else None,
+                usage=usage,
+                events=self._emitter.drain() if collect_events else [],
+                error=str(exc) or "Aborted by user",
+                messages=list(self.memory.messages),
+            )
+            await self._emitter.emit(
+                EventType.RUN_CANCELLED,
+                error=result.error,
+                session_id=result.session_id,
+            )
+            return result
         except RateLimitError:
             await self._emitter.emit(EventType.RUN_FAILED, error="Rate limit exceeded")
             raise
@@ -549,6 +624,7 @@ class Agent:
             )
         finally:
             self._emitter.collect = False
+            self._clear_abort()
 
     async def stream(self, prompt: str) -> AsyncIterator[AgentEvent]:
         """
@@ -940,8 +1016,10 @@ class Agent:
 
         last_error: BaseException | None = None
         for attempt in range(max_attempts):
+            self._raise_if_aborted()
             response, error = await _run_once()
             if error is None:
+                self._raise_if_aborted()
                 return response
 
             last_error = error
@@ -964,7 +1042,13 @@ class Agent:
                     f"(attempt {attempt + 2}/{max_attempts})..."
                 ),
             )
-            await asyncio.sleep(delay)
+            # Sleep in slices so abort is noticed during long backoffs
+            remaining = float(delay)
+            while remaining > 0:
+                self._raise_if_aborted()
+                step = min(0.25, remaining)
+                await asyncio.sleep(step)
+                remaining -= step
 
         if last_error is not None:
             raise last_error
@@ -1007,13 +1091,17 @@ class Agent:
         await self._append_message(Message(role=Role.USER, content=user_query))
 
         while True:
+            self._raise_if_aborted()
             if self.config.compaction_enabled:
                 comp_res = await self.run_compaction(force=False)
                 if comp_res and not comp_res.startswith("Below threshold"):
                     print(f"[Compaction] {comp_res}")
+            self._raise_if_aborted()
             api_messages = self._build_api_messages()
             try:
                 res = await self._create_completion(api_messages, use_tools=True, stream=True)
+            except AbortError:
+                raise
             except Exception as e:
                 detail = f"{type(e).__name__}: {e}"
                 await self._emitter.emit(EventType.ERROR, error=detail)
@@ -1021,6 +1109,8 @@ class Agent:
                     Message(role=Role.ASSISTANT, content=f"[LLM Error] {detail}")
                 )
                 return None
+
+            self._raise_if_aborted()
 
             if not res or not res.choices:
                 await self._emitter.emit(EventType.ERROR, error="LLM returned no choices")
@@ -1056,7 +1146,12 @@ class Agent:
                 return llm_res
 
             history_dirty = False
-            for tool in llm_res.message.tool_calls:
+            tools = list(llm_res.message.tool_calls)
+            for idx, tool in enumerate(tools):
+                if self._abort_event.is_set():
+                    await self._append_aborted_tool_stubs(tools[idx:])
+                    raise AbortError()
+
                 tool_name = tool.function.name
                 tool_arguments = tool.function.arguments
                 await self._emitter.emit(
@@ -1067,6 +1162,9 @@ class Agent:
                 )
                 try:
                     fn_output = await self.dispatch_tool_call(tool_name, tool_arguments)
+                except AbortError:
+                    await self._append_aborted_tool_stubs(tools[idx:])
+                    raise
                 except Exception as e:
                     fn_output = f"Error executing tool {tool_name}: {e}"
                     await self._emitter.emit(
@@ -1095,6 +1193,10 @@ class Agent:
                         tool_call_id=tool.id,
                     )
                 )
+
+                if self._abort_event.is_set():
+                    await self._append_aborted_tool_stubs(tools[idx + 1 :])
+                    raise AbortError()
 
             if age_out_large_payloads(self.memory.messages, keep_recent=16):
                 history_dirty = True
@@ -1178,6 +1280,7 @@ class Agent:
 __all__ = [
     "Agent",
     "AgentError",
+    "AbortError",
     "AuthenticationError",
     "RateLimitError",
     "PermissionDenied",

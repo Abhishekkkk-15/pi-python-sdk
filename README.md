@@ -386,8 +386,31 @@ async for event in agent.stream("Explain agent.py"):
 | `ERROR` | Failure | `error` |
 | `STATUS` | Soft status (e.g. rate-limit retry) | `message` |
 | `RUN_COMPLETED` / `RUN_FAILED` | Turn end | `text` / `error`, `session_id` |
+| `RUN_CANCELLED` | Turn aborted via `agent.abort()` | `error`, `session_id` |
 
 `event.text` is a shortcut for `data["text"]` or `data["content"]`.
+
+### Abort / cancel
+
+Cooperative cancel for WebSocket "stop" buttons — asyncio flag, not threads:
+
+```python
+import asyncio
+from pi_sdk import Agent, EventType
+
+agent = Agent.create(api_key="...", autonomous=True)
+
+async def main():
+    task = asyncio.create_task(agent.run("Long refactor..."))
+    await asyncio.sleep(0.5)   # user hits stop
+    agent.abort()
+    result = await task
+    assert result.status == "cancelled"  # also emits EventType.RUN_CANCELLED
+
+asyncio.run(main())
+```
+
+The run stops at the next checkpoint (before/between LLM calls and tool steps). An in-flight tool usually finishes; remaining tools in that batch get stub results (`"Aborted by user"`) so history stays valid.
 
 ---
 

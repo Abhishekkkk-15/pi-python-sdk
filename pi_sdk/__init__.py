@@ -3,6 +3,7 @@
 from pi_sdk.agent import (
     Agent,
     AgentError,
+    AbortError,
     AuthenticationError,
     PermissionDenied,
     RateLimitError,
@@ -22,6 +23,7 @@ __version__ = "0.3.0"
 __all__ = [
     "Agent",
     "AgentError",
+    "AbortError",
     "AgentEvent",
     "AgentOptions",
     "AuthenticationError",

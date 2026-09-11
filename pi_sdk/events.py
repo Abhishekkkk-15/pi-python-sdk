@@ -12,6 +12,7 @@ class EventType(str, Enum):
     RUN_STARTED = "run_started"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    RUN_CANCELLED = "run_cancelled"
     USER_MESSAGE = "user_message"
     THINKING_DELTA = "thinking_delta"
     THINKING = "thinking"
