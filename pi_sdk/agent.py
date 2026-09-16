@@ -129,6 +129,9 @@ class UsageSummary:
     total_tokens: int = 0
     cached_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    context_tokens: int = 0
+    context_window: int = 0
+    context_percent: float = 0.0
 
 
 @dataclass
@@ -597,7 +600,12 @@ class Agent:
         try:
             choice = await self._chat(prompt, attachments=normalized)
             session = self.memory.session
-            usage = UsageSummary()
+            ctx_usage = self.get_context_window_usage()
+            usage = UsageSummary(
+                context_tokens=ctx_usage["filled_tokens"],
+                context_window=ctx_usage["total_tokens"],
+                context_percent=ctx_usage["percent_used"],
+            )
             if session:
                 usage = UsageSummary(
                     prompt_tokens=session.prompt_tokens,
@@ -605,6 +613,9 @@ class Agent:
                     total_tokens=session.total_tokens,
                     cached_tokens=session.cached_tokens,
                     estimated_cost_usd=session.estimated_cost_usd,
+                    context_tokens=ctx_usage["filled_tokens"],
+                    context_window=ctx_usage["total_tokens"],
+                    context_percent=ctx_usage["percent_used"],
                 )
             if choice is None:
                 result = RunResult(
@@ -895,6 +906,34 @@ class Agent:
             return int(k_match.group(1)) * 1_000
         return 128000
 
+    @property
+    def filled_context_tokens(self) -> int:
+        """
+        Token count of active working messages (system prompt + compaction summary + active tail)
+        that will be sent to the model on the next turn.
+        """
+        comp = self._compaction()
+        return comp.working_token_count(self.memory.messages, self.memory.session)
+
+    def get_context_window_usage(self, model_name: str | None = None) -> dict[str, Any]:
+        """
+        Detailed snapshot of current context window fill status:
+        - filled_tokens: active tokens in working context
+        - total_tokens: model context window limit
+        - remaining_tokens: headroom before reaching model limit
+        - percent_used: percentage of context window currently occupied
+        """
+        filled = self.filled_context_tokens
+        total = self.get_model_context_window(model_name)
+        remaining = max(0, total - filled)
+        percent = round((filled / total) * 100, 2) if total > 0 else 0.0
+        return {
+            "filled_tokens": filled,
+            "total_tokens": total,
+            "remaining_tokens": remaining,
+            "percent_used": percent,
+        }
+
     async def _append_message(self, msg: Message) -> None:
         await self.memory.append_message(msg)
 
@@ -974,12 +1013,16 @@ class Agent:
             self.config.provider,
         )
         await self._persist_session_usage()
+        ctx_usage = self.get_context_window_usage()
         await self._emitter.emit(
             EventType.USAGE,
             prompt_tokens=session.prompt_tokens,
             completion_tokens=session.completion_tokens,
             total_tokens=session.total_tokens,
             estimated_cost_usd=session.estimated_cost_usd,
+            context_tokens=ctx_usage["filled_tokens"],
+            context_window=ctx_usage["total_tokens"],
+            context_percent=ctx_usage["percent_used"],
         )
 
     def _compaction(self) -> Compaction:
