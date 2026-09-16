@@ -1,7 +1,12 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pi_sdk.attachments import Attachment
+
+
 class Role(Enum):
     USER = "user"
     SYSTEM = "system"
@@ -19,37 +24,64 @@ class Role(Enum):
                     return member
         return cls.SYSTEM
 
+
 @dataclass
 class Message:
     role: Role = Role.SYSTEM
     content: str = ""
-    name:str|None = None
-    tool_calls:list[Any]|None = None
-    tool_call_id:str|None = None
-    reasoning_content:str|None = None
-    
+    name: str | None = None
+    tool_calls: list[Any] | None = None
+    tool_call_id: str | None = None
+    reasoning_content: str | None = None
+    # Image/video attachments on user turns (metadata; bytes may be inlined)
+    attachments: list[Any] | None = None
+
     def __post_init__(self):
         if self.name is None and hasattr(self, "name"):
             del self.name
-            
+
         if self.tool_call_id is None and hasattr(self, "tool_call_id"):
             del self.tool_call_id
-            
+
         if self.tool_calls is None and hasattr(self, "tool_calls"):
             del self.tool_calls
 
         if self.reasoning_content is None and hasattr(self, "reasoning_content"):
             del self.reasoning_content
-            
+
+        if self.attachments is None and hasattr(self, "attachments"):
+            del self.attachments
+
     def to_dict(self) -> dict:
-        """Convert to JSON-serializable dict for the Mistral API."""
+        """Convert to JSON-serializable dict for providers / persistence helpers."""
+        from pi_sdk.attachments import (
+            Attachment,
+            attachments_to_content_parts,
+            content_text_fallback,
+        )
+
         role_str = self.role.value if isinstance(self.role, Role) else str(self.role)
         if isinstance(role_str, str) and "." in role_str:
             role_str = role_str.split(".")[-1].lower()
-            
+
+        atts = getattr(self, "attachments", None)
+        content: Any = self.content
+        if atts and role_str == "user":
+            normalized: list[Attachment] = []
+            for a in atts:
+                if isinstance(a, Attachment):
+                    normalized.append(a)
+                elif isinstance(a, dict):
+                    normalized.append(Attachment.from_storage_dict(a))
+            try:
+                content = attachments_to_content_parts(self.content or "", normalized)
+            except ValueError:
+                # Keep plain text if attachments fail to load at encode time
+                content = self.content or ""
+
         data: dict[str, Any] = {
             "role": role_str,
-            "content": self.content
+            "content": content,
         }
         if getattr(self, "name", None) is not None:
             data["name"] = self.name
@@ -75,11 +107,55 @@ class Message:
         elif role_str == "tool":
             data["tool_call_id"] = "call_default"
 
-        return data
-        
-        
+        # Persist attachment metadata separately for history reload
+        if atts:
+            stored = []
+            for a in atts:
+                if isinstance(a, Attachment):
+                    stored.append(a.to_storage_dict())
+                elif isinstance(a, dict):
+                    stored.append(a)
+            if stored:
+                data["attachments"] = stored
+                # Also keep a plain-text mirror for tools that expect str content in storage
+                data["content_text"] = content_text_fallback(content)
 
-from dataclasses import dataclass, field
+        return data
+
+    def to_storage_dict(self) -> dict:
+        """History-friendly dict: content always string; attachments as metadata."""
+        from pi_sdk.attachments import Attachment
+
+        role_str = self.role.value if isinstance(self.role, Role) else str(self.role)
+        if isinstance(role_str, str) and "." in role_str:
+            role_str = role_str.split(".")[-1].lower()
+
+        data: dict[str, Any] = {
+            "role": role_str,
+            "content": self.content or "",
+        }
+        if getattr(self, "name", None) is not None:
+            data["name"] = self.name
+        if getattr(self, "reasoning_content", None) is not None:
+            data["reasoning_content"] = self.reasoning_content
+        if getattr(self, "tool_calls", None) is not None:
+            data["tool_calls"] = self.tool_calls
+        if getattr(self, "tool_call_id", None) is not None:
+            data["tool_call_id"] = self.tool_call_id
+        elif role_str == "tool":
+            data["tool_call_id"] = "call_default"
+        atts = getattr(self, "attachments", None)
+        if atts:
+            stored = []
+            for a in atts:
+                if isinstance(a, Attachment):
+                    stored.append(a.to_storage_dict())
+                elif isinstance(a, dict):
+                    stored.append(a)
+            if stored:
+                data["attachments"] = stored
+        return data
+
 
 @dataclass
 class Session:
@@ -105,6 +181,7 @@ class Session:
     workspace_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
 
 class Models(Enum):
     EMBEED = "mistral-embed"

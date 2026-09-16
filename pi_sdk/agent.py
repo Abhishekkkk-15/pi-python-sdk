@@ -489,9 +489,17 @@ class Agent:
     # Public API
     # ------------------------------------------------------------------
 
-    async def send(self, prompt: str, *, collect_events: bool = False) -> RunResult:
+    async def send(
+        self,
+        prompt: str,
+        *,
+        attachments: list[Any] | None = None,
+        collect_events: bool = False,
+    ) -> RunResult:
         """Alias for run()."""
-        return await self.run(prompt, collect_events=collect_events)
+        return await self.run(
+            prompt, attachments=attachments, collect_events=collect_events
+        )
 
     def abort(self) -> None:
         """
@@ -532,13 +540,62 @@ class Agent:
                 )
             )
 
-    async def run(self, prompt: str, *, collect_events: bool = False) -> RunResult:
-        """Run one user turn to completion (tool loop included)."""
+    async def run(
+        self,
+        prompt: str,
+        *,
+        attachments: list[Any] | None = None,
+        collect_events: bool = False,
+    ) -> RunResult:
+        """Run one user turn to completion (tool loop included).
+
+        ``attachments`` — optional image/video inputs (``Attachment`` or dicts).
+        If the selected model cannot use them, returns ``status="error"`` without
+        crashing the session.
+        """
+        from pi_sdk.attachments import Attachment, validate_attachments_for_model
+
+        normalized: list[Attachment] | None = None
+        if attachments:
+            normalized = []
+            for item in attachments:
+                if isinstance(item, Attachment):
+                    normalized.append(item)
+                elif isinstance(item, dict):
+                    normalized.append(Attachment.from_storage_dict(item))
+                elif isinstance(item, (str, Path)):
+                    normalized.append(Attachment(path=item))
+                else:
+                    return RunResult(
+                        status="error",
+                        error=f"Invalid attachment type: {type(item).__name__}",
+                        messages=list(self.memory.messages),
+                    )
+
+            unsupported = validate_attachments_for_model(
+                normalized,
+                provider=self.config.provider,
+                model=self.config.model,
+            )
+            if unsupported:
+                await self._emitter.emit(EventType.ERROR, error=unsupported)
+                await self._emitter.emit(
+                    EventType.RUN_FAILED,
+                    error=unsupported,
+                    session_id=self.memory.session.id if self.memory.session else None,
+                )
+                return RunResult(
+                    status="error",
+                    error=unsupported,
+                    session_id=self.memory.session.id if self.memory.session else None,
+                    messages=list(self.memory.messages),
+                )
+
         self._clear_abort()
         self._emitter.collect = collect_events
         self._emitter.drain()
         try:
-            choice = await self._chat(prompt)
+            choice = await self._chat(prompt, attachments=normalized)
             session = self.memory.session
             usage = UsageSummary()
             if session:
@@ -613,11 +670,37 @@ class Agent:
             await self._emitter.emit(EventType.RUN_FAILED, error="Rate limit exceeded")
             raise
         except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            # Soft-fail common multimodal / attachment provider rejections
+            low = detail.lower()
+            if normalized and any(
+                key in low
+                for key in (
+                    "image",
+                    "video",
+                    "media",
+                    "multimodal",
+                    "vision",
+                    "unsupported",
+                    "invalid_image",
+                    "file type",
+                )
+            ):
+                await self._emitter.emit(EventType.ERROR, error=detail)
+                await self._emitter.emit(EventType.RUN_FAILED, error=detail)
+                session = self.memory.session
+                return RunResult(
+                    status="error",
+                    error=detail,
+                    session_id=session.id if session else None,
+                    events=self._emitter.drain() if collect_events else [],
+                    messages=list(self.memory.messages),
+                )
             await self._emitter.emit(EventType.RUN_FAILED, error=str(exc))
             session = self.memory.session
             return RunResult(
                 status="error",
-                error=f"{type(exc).__name__}: {exc}",
+                error=detail,
                 session_id=session.id if session else None,
                 events=self._emitter.drain() if collect_events else [],
                 messages=list(self.memory.messages),
@@ -626,7 +709,12 @@ class Agent:
             self._emitter.collect = False
             self._clear_abort()
 
-    async def stream(self, prompt: str) -> AsyncIterator[AgentEvent]:
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        attachments: list[Any] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         """
         Yield events while running a turn.
 
@@ -651,7 +739,9 @@ class Agent:
         self._user_on_event = prev_cb
         self._emitter._on_event = _capture
         try:
-            await self.run(prompt, collect_events=False)
+            await self.run(
+                prompt, attachments=attachments, collect_events=False
+            )
             for event in collected:
                 yield event
         finally:
@@ -1071,14 +1161,23 @@ class Agent:
         await self._flush_pending_usage()
         return session
 
-    async def _chat(self, user_query: str) -> Any:
+    async def _chat(
+        self,
+        user_query: str,
+        *,
+        attachments: list[Any] | None = None,
+    ) -> Any:
         session = await self._ensure_session(user_query)
         await self._emitter.emit(
             EventType.RUN_STARTED,
             prompt=user_query,
             session_id=session.id,
         )
-        await self._emitter.emit(EventType.USER_MESSAGE, text=user_query)
+        await self._emitter.emit(
+            EventType.USER_MESSAGE,
+            text=user_query,
+            attachments=len(attachments or []),
+        )
 
         available_skills = await Skills.names()
         if available_skills:
@@ -1088,7 +1187,13 @@ class Agent:
                 selected = await self.select_relevant_skills(user_query)
             await self.apply_active_skills(selected)
 
-        await self._append_message(Message(role=Role.USER, content=user_query))
+        await self._append_message(
+            Message(
+                role=Role.USER,
+                content=user_query,
+                attachments=list(attachments) if attachments else None,
+            )
+        )
 
         while True:
             self._raise_if_aborted()

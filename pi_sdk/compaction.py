@@ -22,19 +22,24 @@ def _role_str(role: Any) -> str:
 
 
 def _format_message_dict(msg: dict) -> Optional[str]:
+    from pi_sdk.attachments import content_text_fallback, is_multimodal_content
+
     role = str(msg.get("role", "")).upper()
     content = msg.get("content", "") or ""
+    if is_multimodal_content(content):
+        content = content_text_fallback(content)
 
     if role == "SYSTEM":
         return "[SYSTEM PROMPT INCLUDED]"
 
     if role == "USER":
-        return f"USER:\n{content.strip()}\n"
+        return f"USER:\n{str(content).strip()}\n"
 
     if role == "ASSISTANT":
         assistant_block: list[str] = []
-        if content.strip():
-            assistant_block.append(f"ASSISTANT:\n{content.strip()}")
+        text = str(content).strip() if content is not None else ""
+        if text:
+            assistant_block.append(f"ASSISTANT:\n{text}")
         tool_calls = msg.get("tool_calls") or []
         for tool in tool_calls:
             if not isinstance(tool, dict):
@@ -258,7 +263,22 @@ def find_keep_start_by_tokens(
 
 
 def message_to_rough_text(message: Message) -> str:
-    parts = [message.content or ""]
+    from pi_sdk.attachments import content_text_fallback
+
+    content = message.content or ""
+    if not isinstance(content, str):
+        content = content_text_fallback(content)
+    # Include attachment labels when content is plain but attachments exist
+    atts = getattr(message, "attachments", None)
+    if atts and isinstance(content, str):
+        labels = []
+        for a in atts:
+            mime = getattr(a, "mime", None) or (a.get("mime") if isinstance(a, dict) else None)
+            name = getattr(a, "filename", None) or (a.get("filename") if isinstance(a, dict) else None)
+            labels.append(f"[{mime or 'media'}: {name or 'attachment'}]")
+        if labels:
+            content = (content + "\n" + "\n".join(labels)).strip()
+    parts = [content]
     if getattr(message, "tool_calls", None):
         try:
             parts.append(json.dumps(message.tool_calls, default=str))

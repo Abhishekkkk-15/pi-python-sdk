@@ -27,32 +27,47 @@ def _require_motor():
 
 
 def _message_to_doc(session_id: str, seq: int, msg: Message, user_id: str | None) -> dict:
+    if hasattr(msg, "to_storage_dict"):
+        base = msg.to_storage_dict()
+    else:
+        base = {
+            "role": msg.role.value if isinstance(msg.role, Role) else str(msg.role),
+            "content": msg.content or "",
+        }
     doc: dict[str, Any] = {
         "session_id": session_id,
         "seq": seq,
-        "role": msg.role.value if isinstance(msg.role, Role) else str(msg.role),
-        "content": msg.content or "",
+        "role": base.get("role"),
+        "content": base.get("content") or "",
         "user_id": user_id,
     }
-    if getattr(msg, "name", None) is not None:
-        doc["name"] = msg.name
-    if getattr(msg, "tool_calls", None) is not None:
-        doc["tool_calls"] = msg.tool_calls
-    if getattr(msg, "tool_call_id", None) is not None:
-        doc["tool_call_id"] = msg.tool_call_id
-    if getattr(msg, "reasoning_content", None) is not None:
-        doc["reasoning_content"] = msg.reasoning_content
+    for key in ("name", "tool_calls", "tool_call_id", "reasoning_content", "attachments"):
+        if base.get(key) is not None:
+            doc[key] = base[key]
     return doc
 
 
 def _doc_to_message(data: dict) -> Message:
+    from pi_sdk.attachments import Attachment
+
+    content = data.get("content", "") or ""
+    if isinstance(content, list):
+        content = data.get("content_text") or ""
+    atts_raw = data.get("attachments")
+    attachments = None
+    if atts_raw:
+        attachments = [
+            Attachment.from_storage_dict(a) if isinstance(a, dict) else a
+            for a in atts_raw
+        ]
     return Message(
         role=Role.from_val(data.get("role", "system")),
-        content=data.get("content", "") or "",
+        content=content if isinstance(content, str) else str(content),
         name=data.get("name"),
         tool_calls=data.get("tool_calls"),
         tool_call_id=data.get("tool_call_id"),
         reasoning_content=data.get("reasoning_content"),
+        attachments=attachments,
     )
 
 

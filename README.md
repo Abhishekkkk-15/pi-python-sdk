@@ -176,6 +176,7 @@ Database default: `pi_sdk` (`mongodb_db`). Indexes: `sessions.user_id`, `session
 | `tool_calls` | `any` | Optional assistant tool calls |
 | `tool_call_id` | `string` | Optional tool-result id |
 | `reasoning_content` | `string` | Optional model reasoning |
+| `attachments` | `list` | Optional image/video metadata (`path`/`url`/`mime`/`filename`/optional `data_base64`) |
 
 Optional message fields are omitted when `null`. Docker sandbox settings (`docker_container`, `docker_workdir`, volume mounts) are **not** stored — pass them again on `Agent.create` (or via env).
 
@@ -240,6 +241,7 @@ class MongoMessageDocument(BaseModel):
     tool_calls: list[Any] | None = None
     tool_call_id: str | None = None
     reasoning_content: str | None = None
+    attachments: list[dict[str, Any]] | None = None
 ```
 
 Example: load a session doc from Motor:
@@ -411,6 +413,41 @@ asyncio.run(main())
 ```
 
 The run stops at the next checkpoint (before/between LLM calls and tool steps). An in-flight tool usually finishes; remaining tools in that batch get stub results (`"Aborted by user"`) so history stays valid.
+
+### Attachments (images / video)
+
+Pass media on `run` / `stream` / `send` for vision-capable models:
+
+```python
+from pi_sdk import Agent, Attachment
+
+agent = Agent.create(api_key="...", provider="openai", model="gpt-4o")
+
+result = await agent.run(
+    "What changed in this screenshot?",
+    attachments=[
+        Attachment(path="ui.png"),
+        # Attachment(url="https://example.com/clip.mp4"),  # video → prefer Gemini/Vertex
+        # Attachment(data=raw_bytes, mime="image/png", filename="a.png"),
+    ],
+)
+if result.status == "error":
+    # e.g. model does not support images/video — session is not broken
+    print(result.error)
+```
+
+Supported kinds: **image/** (`png`, `jpeg`, `webp`, `gif`, …) and **video/** (`mp4`, `webm`, …).
+
+Capability (soft-fail, no crash):
+
+| Media | Typical providers / models |
+|-------|----------------------------|
+| Images | `gpt-4o` / `gpt-4.1` / `gpt-5*`, Gemini/Vertex, Pixtral, many `*-vl` models |
+| Video | Gemini / Vertex primarily |
+
+If the selected model cannot use the attachment, `run` returns `status="error"` with a clear message and emits `ERROR` / `RUN_FAILED` — the agent and session stay usable.
+
+Limits: images ≤ 20 MB, video ≤ 50 MB. Attachment metadata is stored on the user message (path/url/mime; inline `data` only when no path/url).
 
 ---
 

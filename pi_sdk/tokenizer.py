@@ -77,10 +77,14 @@ def clear_tokenizer_cache() -> None:
 
 def message_to_text(message: Message) -> str:
     """Flatten a Message into text suitable for tokenization."""
+    from pi_sdk.attachments import content_text_fallback
+
     role = (
         message.role.value if isinstance(message.role, Role) else str(message.role)
     )
-    parts: List[str] = [f"{role}: {message.content or ''}"]
+    raw = message.content or ""
+    text = raw if isinstance(raw, str) else content_text_fallback(raw)
+    parts: List[str] = [f"{role}: {text}"]
 
     tool_calls = getattr(message, "tool_calls", None)
     if tool_calls:

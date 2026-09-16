@@ -296,22 +296,38 @@ class OpenAIProvider(LLMProvider):
     def _messages_to_responses_input(
         messages: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]]]:
+        from pi_sdk.attachments import (
+            content_text_fallback,
+            is_multimodal_content,
+            to_openai_responses_user_content,
+        )
+
         instructions_parts: list[str] = []
         items: list[dict[str, Any]] = []
         for msg in messages:
             role = (msg.get("role") or "").lower()
             content = msg.get("content") or ""
             if role == "system":
-                if content:
-                    instructions_parts.append(str(content))
+                text = content_text_fallback(content) if is_multimodal_content(content) else content
+                if text:
+                    instructions_parts.append(str(text))
                 continue
             if role == "user":
-                items.append({"role": "user", "content": content})
+                if is_multimodal_content(content):
+                    items.append(
+                        {
+                            "role": "user",
+                            "content": to_openai_responses_user_content(content),
+                        }
+                    )
+                else:
+                    items.append({"role": "user", "content": content})
                 continue
             if role == "assistant":
                 tool_calls = msg.get("tool_calls") or []
-                if content:
-                    items.append({"role": "assistant", "content": content})
+                text = content_text_fallback(content) if is_multimodal_content(content) else content
+                if text:
+                    items.append({"role": "assistant", "content": text})
                 for tc in tool_calls:
                     fn = tc.get("function") if isinstance(tc, dict) else {}
                     if not isinstance(fn, dict):
@@ -327,11 +343,12 @@ class OpenAIProvider(LLMProvider):
                     )
                 continue
             if role == "tool":
+                text = content_text_fallback(content) if is_multimodal_content(content) else content
                 items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.get("tool_call_id") or "call_unknown",
-                        "output": str(content),
+                        "output": str(text),
                     }
                 )
         return "\n\n".join(instructions_parts), items
@@ -351,9 +368,18 @@ class OpenAIProvider(LLMProvider):
         stream_handler: StreamHandler | None,
         count_usage: Callable[..., Any] | None,
     ) -> Completion:
+        from pi_sdk.attachments import is_multimodal_content, to_openai_chat_content
+
+        api_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            m = dict(msg)
+            if is_multimodal_content(m.get("content")):
+                m["content"] = to_openai_chat_content(m.get("content"))
+            api_messages.append(m)
+
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": api_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
         }

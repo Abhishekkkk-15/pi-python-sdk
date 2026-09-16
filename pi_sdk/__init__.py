@@ -10,6 +10,7 @@ from pi_sdk.agent import (
     RunResult,
     UsageSummary,
 )
+from pi_sdk.attachments import Attachment
 from pi_sdk.config import AgentOptions, Config, BUILTIN_PROVIDERS
 from pi_sdk.events import AgentEvent, EventType
 from pi_sdk.models import Message, Role, Session
@@ -26,6 +27,7 @@ __all__ = [
     "AbortError",
     "AgentEvent",
     "AgentOptions",
+    "Attachment",
     "AuthenticationError",
     "RateLimitError",
     "BUILTIN_PROVIDERS",

@@ -410,6 +410,12 @@ class VertexAIProvider(LLMProvider):
     def _messages_to_contents(
         messages: list[dict[str, Any]], types: Any
     ) -> tuple[str, list[Any]]:
+        from pi_sdk.attachments import (
+            content_text_fallback,
+            is_multimodal_content,
+            vertex_parts_from_content,
+        )
+
         instructions: list[str] = []
         contents: list[Any] = []
         call_names: dict[str, str] = {}
@@ -427,23 +433,36 @@ class VertexAIProvider(LLMProvider):
             role = (msg.get("role") or "").lower()
             content = msg.get("content") or ""
             if role == "system":
-                if content:
-                    instructions.append(str(content))
+                text = (
+                    content_text_fallback(content)
+                    if is_multimodal_content(content)
+                    else content
+                )
+                if text:
+                    instructions.append(str(text))
                 i += 1
                 continue
             if role == "user":
+                parts = vertex_parts_from_content(content, types)
+                if not parts:
+                    parts = [types.Part.from_text(text="")]
                 contents.append(
                     types.Content(
                         role="user",
-                        parts=[types.Part.from_text(text=str(content))],
+                        parts=parts,
                     )
                 )
                 i += 1
                 continue
             if role == "assistant":
                 parts: list[Any] = []
-                if content:
-                    parts.append(types.Part.from_text(text=str(content)))
+                text = (
+                    content_text_fallback(content)
+                    if is_multimodal_content(content)
+                    else content
+                )
+                if text:
+                    parts.append(types.Part.from_text(text=str(text)))
                 for tc in msg.get("tool_calls") or []:
                     fn = tc.get("function") if isinstance(tc, dict) else {}
                     if not isinstance(fn, dict):

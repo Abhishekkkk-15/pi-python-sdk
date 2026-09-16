@@ -64,13 +64,40 @@ def _default_serializer(obj: Any) -> Any:
 async def write_jsonl(path: Path | str, data_list: Sequence[Any], mode: str = "w") -> None:
     async with aiofiles.open(path, mode, encoding="utf-8") as file:
         for item in data_list:
-            if hasattr(item, "to_dict"):
+            if hasattr(item, "to_storage_dict"):
+                payload = item.to_storage_dict()
+            elif hasattr(item, "to_dict"):
                 payload = item.to_dict()
             elif is_dataclass(item):
                 payload = asdict(item)
             else:
                 payload = item
             await file.write(json.dumps(payload, default=_default_serializer) + "\n")
+
+
+def _message_from_data(data: dict) -> Message:
+    from pi_sdk.attachments import Attachment
+
+    content = data.get("content", "")
+    if isinstance(content, list):
+        # Legacy/API-shaped content — keep text mirror if present
+        content = data.get("content_text") or ""
+    atts_raw = data.get("attachments")
+    attachments = None
+    if atts_raw:
+        attachments = [
+            Attachment.from_storage_dict(a) if isinstance(a, dict) else a
+            for a in atts_raw
+        ]
+    return Message(
+        role=Role.from_val(data.get("role", "system")),
+        content=content if isinstance(content, str) else str(content or ""),
+        name=data.get("name", None),
+        tool_calls=data.get("tool_calls", None),
+        tool_call_id=data.get("tool_call_id", None),
+        reasoning_content=data.get("reasoning_content", None),
+        attachments=attachments,
+    )
 
 
 async def read_jsonl(path: Path | str) -> list[Message]:
@@ -84,16 +111,7 @@ async def read_jsonl(path: Path | str) -> list[Message]:
             if not line:
                 continue
             data = json.loads(line)
-            messages.append(
-                Message(
-                    role=Role.from_val(data.get("role", "system")),
-                    content=data.get("content", ""),
-                    name=data.get("name", None),
-                    tool_calls=data.get("tool_calls", None),
-                    tool_call_id=data.get("tool_call_id", None),
-                    reasoning_content=data.get("reasoning_content", None),
-                )
-            )
+            messages.append(_message_from_data(data))
     return messages
 
 
