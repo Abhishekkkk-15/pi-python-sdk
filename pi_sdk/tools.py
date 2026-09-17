@@ -71,8 +71,9 @@ async def _kill_process_tree(pid: int):
         pass
 
 
-DEFAULT_MAX_LINES = 1000
-DEFAULT_MAX_BYTES = 50 * 1024  # 50KB
+DEFAULT_MAX_LINES = 200
+DEFAULT_READ_LIMIT = 100
+DEFAULT_MAX_BYTES = 30 * 1024  # 30KB
 
 
 def _resolve_workspace_path(path: str | Path | None) -> Path:
@@ -144,11 +145,10 @@ async def execute_read(
         if start_line >= total_lines and total_lines > 0:
             return f"Error: Offset {offset} is beyond end of file ({total_lines} lines total)"
 
-        if limit is not None:
-            end_line = min(start_line + limit, total_lines)
-            selected_lines = all_lines[start_line:end_line]
-        else:
-            selected_lines = all_lines[start_line:]
+        # Default to DEFAULT_READ_LIMIT lines if limit omitted; cap at DEFAULT_MAX_LINES
+        effective_limit = min(limit, DEFAULT_MAX_LINES) if limit is not None else DEFAULT_READ_LIMIT
+        end_line = min(start_line + effective_limit, total_lines)
+        selected_lines = all_lines[start_line:end_line]
 
         # Truncate content if it exceeds line or byte limits
         truncated_lines = []
@@ -159,11 +159,6 @@ async def execute_read(
         for idx, line in enumerate(selected_lines):
             formatted_line = f"{start_line + idx + 1}: {line}"
             line_bytes = len(formatted_line.encode("utf-8")) + 1  # +1 for newline
-
-            if len(truncated_lines) >= DEFAULT_MAX_LINES:
-                truncated = True
-                truncated_by = "lines"
-                break
 
             if bytes_accumulated + line_bytes > DEFAULT_MAX_BYTES:
                 truncated = True
@@ -179,14 +174,10 @@ async def execute_read(
 
         if truncated:
             next_offset = end_line_display + 1
-            if truncated_by == "lines":
-                output_text += f"\n\n[Truncated: showing {output_lines_count} lines of {total_lines}. Use offset={next_offset} to continue.]"
-            else:
-                output_text += f"\n\n[Truncated: showing {output_lines_count} lines of {total_lines} ({DEFAULT_MAX_BYTES // 1024}KB limit). Use offset={next_offset} to continue.]"
-        elif limit is not None and start_line + limit < total_lines:
-            remaining = total_lines - (start_line + limit)
-            next_offset = start_line + limit + 1
-            output_text += f"\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            output_text += f"\n\n[Truncated: showing {output_lines_count} lines ({start_line + 1}-{end_line_display}) of {total_lines} ({DEFAULT_MAX_BYTES // 1024}KB limit). Use offset={next_offset} to continue.]"
+        elif end_line_display < total_lines:
+            next_offset = end_line_display + 1
+            output_text += f"\n\n[Showing {output_lines_count} lines ({start_line + 1}-{end_line_display}) of {total_lines}. Use offset={next_offset} to continue, or grep to locate specific code.]"
 
         return output_text
     except Exception as e:
@@ -957,7 +948,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read",
-            "description": "Read file contents at the given path. Supports optional offset and limit for paginated reading of large files.",
+            "description": "Read file contents at the given path. Supports offset and limit (default: 100 lines, max: 200). Always use targeted line ranges or grep to locate code efficiently.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -967,11 +958,11 @@ TOOLS = [
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Line number to start reading from (1-indexed, optional)."
+                        "description": "Line number to start reading from (1-indexed, optional, default: 1)."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of lines to read (optional)."
+                        "description": "Maximum number of lines to read (optional, default: 100, max: 200). Prefer small ranges (20-60 lines) for surgical inspection."
                     }
                 },
                 "required": ["path"]

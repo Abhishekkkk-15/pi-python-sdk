@@ -94,6 +94,9 @@ class Prompt:
 
         add_guideline("Be concise in your responses")
         add_guideline("Show file paths clearly when working with files")
+        add_guideline("Use surgical reading: use grep to locate exact lines first, and specify small offset and limit ranges (under 80 lines) rather than reading wide code ranges")
+        add_guideline("Avoid redundant reads: do not re-read files immediately after editing them unless a build or test fails, and do not re-read context or instruction files if already read in the conversation")
+        add_guideline("Batch edits: plan modifications upfront and apply multiple changes in a single edit or write call rather than making dozens of separate micro-edits")
 
         guidelines_formatted = "\n".join(f"- {g}" for g in guidelines_list)
 
