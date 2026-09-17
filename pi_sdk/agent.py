@@ -132,6 +132,8 @@ class UsageSummary:
     context_tokens: int = 0
     context_window: int = 0
     context_percent: float = 0.0
+    compact_at_tokens: int | None = None
+    model_limit: int | None = None
 
 
 @dataclass
@@ -605,6 +607,8 @@ class Agent:
                 context_tokens=ctx_usage["filled_tokens"],
                 context_window=ctx_usage["total_tokens"],
                 context_percent=ctx_usage["percent_used"],
+                compact_at_tokens=ctx_usage.get("compact_at_tokens"),
+                model_limit=ctx_usage.get("model_limit"),
             )
             if session:
                 usage = UsageSummary(
@@ -616,6 +620,8 @@ class Agent:
                     context_tokens=ctx_usage["filled_tokens"],
                     context_window=ctx_usage["total_tokens"],
                     context_percent=ctx_usage["percent_used"],
+                    compact_at_tokens=ctx_usage.get("compact_at_tokens"),
+                    model_limit=ctx_usage.get("model_limit"),
                 )
             if choice is None:
                 result = RunResult(
@@ -919,19 +925,25 @@ class Agent:
         """
         Detailed snapshot of current context window fill status:
         - filled_tokens: active tokens in working context
-        - total_tokens: model context window limit
-        - remaining_tokens: headroom before reaching model limit
-        - percent_used: percentage of context window currently occupied
+        - total_tokens: compaction threshold limit (compact_at_tokens)
+        - remaining_tokens: headroom before reaching compaction threshold
+        - percent_used: percentage of compaction threshold currently occupied
+        - compact_at_tokens: compaction threshold
+        - model_limit: full model context limit
         """
         filled = self.filled_context_tokens
-        total = self.get_model_context_window(model_name)
-        remaining = max(0, total - filled)
-        percent = round((filled / total) * 100, 2) if total > 0 else 0.0
+        compact_limit = getattr(self.config, "compact_at_tokens", None) or 80_000
+        model_limit = self.get_model_context_window(model_name)
+        target_limit = compact_limit if getattr(self.config, "compaction_enabled", True) else model_limit
+        remaining = max(0, target_limit - filled)
+        percent = round((filled / target_limit) * 100, 2) if target_limit > 0 else 0.0
         return {
             "filled_tokens": filled,
-            "total_tokens": total,
+            "total_tokens": target_limit,
             "remaining_tokens": remaining,
             "percent_used": percent,
+            "compact_at_tokens": compact_limit,
+            "model_limit": model_limit,
         }
 
     async def _append_message(self, msg: Message) -> None:
@@ -1023,6 +1035,8 @@ class Agent:
             context_tokens=ctx_usage["filled_tokens"],
             context_window=ctx_usage["total_tokens"],
             context_percent=ctx_usage["percent_used"],
+            compact_at_tokens=ctx_usage.get("compact_at_tokens"),
+            model_limit=ctx_usage.get("model_limit"),
         )
 
     def _compaction(self) -> Compaction:
