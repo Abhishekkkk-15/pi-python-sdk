@@ -979,6 +979,7 @@ class Agent:
             self.config.output_price_per_mtok,
             self._pending_cached_tokens,
             self.config.provider,
+            cached_price=getattr(self.config, "cached_price_per_mtok", None),
         )
         self._pending_prompt_tokens = 0
         self._pending_completion_tokens = 0
@@ -1016,28 +1017,39 @@ class Agent:
         session.completion_tokens += completion
         session.total_tokens += total
         session.cached_tokens += cached
-        session.estimated_cost_usd += estimate_cost(
+        turn_cost = estimate_cost(
             prompt,
             completion,
             self.config.input_price_per_mtok,
             self.config.output_price_per_mtok,
             cached,
             self.config.provider,
+            cached_price=getattr(self.config, "cached_price_per_mtok", None),
         )
+        session.estimated_cost_usd += turn_cost
         await self._persist_session_usage()
         ctx_usage = self.get_context_window_usage()
         await self._emitter.emit(
             EventType.USAGE,
-            prompt_tokens=session.prompt_tokens,
-            completion_tokens=session.completion_tokens,
-            total_tokens=session.total_tokens,
-            estimated_cost_usd=session.estimated_cost_usd,
+            # Turn-level counts (what actually happened this LLM call)
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=total,
+            cached_tokens=cached,
+            estimated_cost_usd=turn_cost,
+            # Session-level cumulative totals (for display)
+            session_prompt_tokens=session.prompt_tokens,
+            session_completion_tokens=session.completion_tokens,
+            session_total_tokens=session.total_tokens,
+            session_cached_tokens=session.cached_tokens,
+            session_estimated_cost_usd=session.estimated_cost_usd,
             context_tokens=ctx_usage["filled_tokens"],
             context_window=ctx_usage["total_tokens"],
             context_percent=ctx_usage["percent_used"],
             compact_at_tokens=ctx_usage.get("compact_at_tokens"),
             model_limit=ctx_usage.get("model_limit"),
         )
+
 
     def _compaction(self) -> Compaction:
         return Compaction(

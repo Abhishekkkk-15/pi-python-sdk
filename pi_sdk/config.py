@@ -51,21 +51,25 @@ def estimate_cost(
     output_price: float,
     cached_tokens: int = 0,
     provider: str = "openai",
+    cached_price: Optional[float] = None,
 ) -> float:
-    provider_lower = str(provider).lower()
-    if (
-        "anthropic" in provider_lower
-        or "claude" in provider_lower
-        or "deepseek" in provider_lower
-    ):
-        discount = 0.1
-    else:
-        discount = 0.5
-
     non_cached = max(0, prompt_tokens - cached_tokens)
-    input_cost = (
-        non_cached * input_price + cached_tokens * input_price * discount
-    ) / 1_000_000
+    if cached_price is not None:
+        # Explicit cached price per million tokens provided
+        cached_cost = (cached_tokens * cached_price) / 1_000_000
+    else:
+        provider_lower = str(provider).lower()
+        if (
+            "anthropic" in provider_lower
+            or "claude" in provider_lower
+            or "deepseek" in provider_lower
+        ):
+            discount = 0.1
+        else:
+            discount = 0.5
+        cached_cost = (cached_tokens * input_price * discount) / 1_000_000
+
+    input_cost = (non_cached * input_price) / 1_000_000 + cached_cost
     output_cost = (completion_tokens * output_price) / 1_000_000
     return input_cost + output_cost
 
@@ -123,6 +127,7 @@ class AgentOptions:
     reasoning_effort: Optional[str] = None
     input_price_per_mtok: float = DEFAULT_INPUT_PRICE_PER_MTOK
     output_price_per_mtok: float = DEFAULT_OUTPUT_PRICE_PER_MTOK
+    cached_price_per_mtok: Optional[float] = None
     max_history_messages: int = DEFAULT_MAX_HISTORY_MESSAGES
     skill_names: Optional[list[str]] = None
     skills_dirs: Optional[list[str]] = None
@@ -162,6 +167,7 @@ class Config:
     reasoning_effort: Optional[str] = None
     input_price_per_mtok: float = DEFAULT_INPUT_PRICE_PER_MTOK
     output_price_per_mtok: float = DEFAULT_OUTPUT_PRICE_PER_MTOK
+    cached_price_per_mtok: Optional[float] = None
     max_history_messages: int = DEFAULT_MAX_HISTORY_MESSAGES
     cwd: Optional[str] = None
     data_dir: Optional[str] = None
@@ -235,6 +241,7 @@ class Config:
             reasoning_effort=reasoning,
             input_price_per_mtok=float(opts.input_price_per_mtok),
             output_price_per_mtok=float(opts.output_price_per_mtok),
+            cached_price_per_mtok=getattr(opts, "cached_price_per_mtok", None),
             max_history_messages=int(opts.max_history_messages),
             cwd=opts.cwd,
             data_dir=opts.data_dir,
