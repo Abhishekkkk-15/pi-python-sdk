@@ -131,6 +131,10 @@ async def execute_read(
         if not filepath.is_file():
             return f"Error: '{path}' is a directory, not a file."
 
+        filename = filepath.name.lower()
+        if filename in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb") and (offset is None or offset <= 1) and (limit is None or limit > 30):
+            return f"Notice: '{filepath.name}' is an automated package lockfile. To prevent context overflow and preserve token efficiency, inspect 'package.json' for dependency declarations instead."
+
         try:
             async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
                 content = await f.read()
