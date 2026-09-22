@@ -111,17 +111,38 @@ class Prompt:
 
         # 4. Project Context Injection (<project_context>)
         ctx_files = list(context_files or [])
-        # Auto-discover AGENTS.md in current directory if context_files wasn't explicitly passed
-        if not context_files:
-            agents_md = Path(effective_cwd) / "AGENTS.md"
-            if agents_md.is_file():
-                try:
-                    ctx_files.append({
-                        "path": "AGENTS.md",
-                        "content": agents_md.read_text(encoding="utf-8")
-                    })
-                except Exception:
-                    pass
+        # Auto-discover AGENT.md / AGENTS.md and CONTEXT.md in current directory if context_files wasn't explicitly passed
+        if not context_files and effective_cwd:
+            cwd_path = Path(effective_cwd)
+            # 1. Agent instructions
+            for name in ("AGENT.md", "agent.md", "AGENTS.md", "agents.md"):
+                candidate = cwd_path / name
+                if candidate.is_file():
+                    try:
+                        content = candidate.read_text(encoding="utf-8").strip()
+                        if content:
+                            ctx_files.append({
+                                "path": candidate.name,
+                                "content": content,
+                            })
+                        break
+                    except Exception:
+                        pass
+
+            # 2. Workspace context
+            for name in ("CONTEXT.md", "context.md"):
+                candidate = cwd_path / name
+                if candidate.is_file():
+                    try:
+                        content = candidate.read_text(encoding="utf-8").strip()
+                        if content:
+                            ctx_files.append({
+                                "path": candidate.name,
+                                "content": content,
+                            })
+                        break
+                    except Exception:
+                        pass
 
         if ctx_files:
             prompt += "\n\n<project_context>\n\n"
